@@ -1,16 +1,22 @@
-import type { ActivityEvent, Bot, GridConfig, MarketSnapshot, RuntimeMetrics } from "@/domain/types";
+import type {
+  ActivityEvent,
+  Bot,
+  GridConfig,
+  MarketSnapshot,
+  RuntimeMetrics,
+} from "@/domain/types";
 
 export const defaultBotConfig: GridConfig = {
   pair: "BTC",
-  lowerPrice: "92000",
-  upperPrice: "108000",
+  lowerPrice: "73000",
+  upperPrice: "76000",
   gridCount: 16,
   capitalAllocation: "2500",
   leverage: 2,
   spacing: "arithmetic",
   orderSize: "75",
-  takeProfit: "112000",
-  stopLoss: "88000",
+  takeProfit: "88000",
+  stopLoss: "66000",
   maxDrawdownPct: "8",
   autoPauseOutOfRange: true,
   autoRecenter: false,
