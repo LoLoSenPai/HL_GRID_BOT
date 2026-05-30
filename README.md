@@ -19,6 +19,15 @@ PROPR_LIVE_WS_URL=
 Paper trading uses local SQLite and does not need Propr credentials. Propr credentials are server-only and must not be
 prefixed with `NEXT_PUBLIC_`.
 
+## Vercel demo mode
+
+The app can run on Vercel for demo purposes. When `VERCEL=1`, the SQLite file is redirected to `/tmp`, because the
+project filesystem is not persistent at runtime on Vercel.
+
+This is enough to show the dashboard, paper mode and Propr readiness screens to someone, but bot/order/fill state can be
+reset between serverless cold starts. Real persistence on Vercel should use an external database before enabling live
+execution.
+
 First, run the development server:
 
 ```bash
