@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "skills": {
+    "hyperliquid": {
+      "source": "starchild-ai-agent/official-skills",
+      "sourceType": "github",
+      "skillPath": "hyperliquid/SKILL.md",
+      "computedHash": "7996727b5ef1b8d1d2c038b0c243755dfc42b359e19a1527d8f466b06355dbd4"
+    },
+    "hyperliquid-grid-trading-bot": {
+      "source": "aradotso/trending-skills",
+      "sourceType": "github",
+      "skillPath": "skills/hyperliquid-grid-trading-bot/SKILL.md",
+      "computedHash": "ea4b5536d2d0ad1bf20ac9bd9588339f47ff6774c003e09f15ceeb6167de419f"
+    }
+  }
+}

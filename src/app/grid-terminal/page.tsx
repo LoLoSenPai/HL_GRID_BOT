@@ -1,0 +1,135 @@
+import { RefreshCw } from "lucide-react";
+
+import { ActivityFeed } from "@/components/activity/activity-feed";
+import { TerminalChart } from "@/components/charts/terminal-chart";
+import { GridConfigPanel } from "@/components/trading/grid-config-panel";
+import { MetricCard } from "@/components/trading/metric-card";
+import { StatusBadge } from "@/components/trading/status-badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { reconcilePaperRuntimeAction, simulateFillAction } from "@/features/bots/actions";
+import { defaultBotConfig } from "@/features/bots/sample-data";
+import { getBotRuntimeState, getRuntimeMetrics, listBots, listEvents, listFills, listOrders } from "@/features/bots/repository";
+import { getCandlesForConfig, getMarketSnapshots } from "@/features/market-data/service";
+
+export const dynamic = "force-dynamic";
+
+export default async function GridTerminalPage() {
+  const bots = listBots();
+  const activeBot = bots.find((bot) => ["paper", "running", "out_of_range"].includes(bot.status)) ?? bots[0];
+  const config = activeBot?.config ?? defaultBotConfig;
+  const metrics = getRuntimeMetrics();
+  const events = activeBot ? listEvents(20, activeBot.id) : [];
+  const orders = activeBot ? listOrders(activeBot.id) : [];
+  const fills = activeBot ? listFills(activeBot.id) : [];
+  const runtimeState = activeBot ? getBotRuntimeState(activeBot.id) : null;
+  const [markets, candles] = await Promise.all([getMarketSnapshots([config.pair]), getCandlesForConfig(config)]);
+  const market = markets[0] ?? { asset: config.pair, mid: "0", funding: "0", timestamp: 0 };
+
+  return (
+    <div className="flex h-full flex-col overflow-hidden">
+      <div className="border-b p-4 lg:p-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-semibold tracking-normal">Grid Terminal</h1>
+            <StatusBadge status={activeBot?.status ?? "draft"} />
+          </div>
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
+            <MetricCard label="Pair" value={config.pair} />
+            <MetricCard label="Price" value={market.mid} />
+            <MetricCard label="24h" value={formatChange(market.change24hPct)} />
+            <MetricCard label="Funding" value={formatFunding(market.funding)} />
+            <MetricCard label="Equity" value={metrics.equity} />
+            <MetricCard label="PnL" value={`${Number(metrics.pnl) >= 0 ? "+" : ""}${metrics.pnl}`} />
+          </div>
+        </div>
+      </div>
+
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 overflow-auto p-4 lg:grid-cols-[minmax(0,1fr)_360px] lg:p-5">
+        <div className="flex min-w-0 flex-col gap-4">
+          <Card className="rounded-lg">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm">Candles, grid levels, fills and range limits</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <TerminalChart config={config} candles={candles} />
+            </CardContent>
+          </Card>
+          {activeBot ? (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs text-muted-foreground">
+                Last runtime mark:{" "}
+                <span className="metric-mono text-foreground">{runtimeState?.lastPrice ?? "not reconciled"}</span>
+              </div>
+              <div className="flex gap-2">
+                <form action={reconcilePaperRuntimeAction}>
+                  <input type="hidden" name="id" value={activeBot.id} />
+                  <Button type="submit" variant="outline">
+                    <RefreshCw />
+                    Reconcile
+                  </Button>
+                </form>
+                <form action={simulateFillAction}>
+                  <input type="hidden" name="id" value={activeBot.id} />
+                  <Button type="submit" variant="outline" disabled={!orders.some((order) => order.status === "open")}>
+                    Simulate next paper fill
+                  </Button>
+                </form>
+              </div>
+            </div>
+          ) : null}
+          <Tabs defaultValue="orders" className="w-full">
+            <TabsList>
+              <TabsTrigger value="orders">Orders</TabsTrigger>
+              <TabsTrigger value="fills">Fills</TabsTrigger>
+              <TabsTrigger value="logs">Bot logs</TabsTrigger>
+            </TabsList>
+            <TabsContent value="orders" className="rounded-lg border p-3 text-sm text-muted-foreground">
+              <div className="grid gap-2">
+                {orders.slice(0, 8).map((order) => (
+                  <div key={order.id} className="grid grid-cols-[80px_80px_1fr_100px] gap-3 rounded-md border bg-muted/20 p-2">
+                    <span className={order.side === "buy" ? "text-primary" : "text-amber-200"}>{order.side}</span>
+                    <span>{order.status}</span>
+                    <span className="metric-mono">{order.quantity} {order.asset}</span>
+                    <span className="metric-mono text-right">{order.price}</span>
+                  </div>
+                ))}
+                {!orders.length ? "No persisted paper orders yet. Start a paper bot from the configuration panel." : null}
+              </div>
+            </TabsContent>
+            <TabsContent value="fills" className="rounded-lg border p-3 text-sm text-muted-foreground">
+              <div className="grid gap-2">
+                {fills.slice(0, 8).map((fill) => (
+                  <div key={fill.id} className="grid grid-cols-[80px_1fr_100px_100px] gap-3 rounded-md border bg-muted/20 p-2">
+                    <span className={fill.side === "buy" ? "text-primary" : "text-amber-200"}>{fill.side}</span>
+                    <span className="metric-mono">{fill.quantity} {fill.asset}</span>
+                    <span className="metric-mono text-right">{fill.price}</span>
+                    <span className="metric-mono text-right">{fill.fee}</span>
+                  </div>
+                ))}
+                {!fills.length ? "No persisted fills yet. Use the simulator button to fill the next paper order." : null}
+              </div>
+            </TabsContent>
+            <TabsContent value="logs" className="rounded-lg border p-3">
+              <ActivityFeed events={events} />
+            </TabsContent>
+          </Tabs>
+        </div>
+        <GridConfigPanel />
+      </div>
+    </div>
+  );
+}
+
+function formatChange(value?: string): string {
+  if (!value) return "n/a";
+  const sign = Number(value) > 0 ? "+" : "";
+  return `${sign}${value}%`;
+}
+
+function formatFunding(value?: string): string {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return "n/a";
+  return `${(parsed * 100).toFixed(4)}%`;
+}
