@@ -14,7 +14,7 @@
 /coverage
 
 # local sqlite runtime data
-/data
+# /data
 
 # next.js
 /.next/
