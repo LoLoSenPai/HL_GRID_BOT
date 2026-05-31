@@ -7,8 +7,9 @@ import {
   createLiveCandidateFromBot,
   deleteBot,
   duplicateBot,
+  reconcileProprBot,
   simulateNextPaperFill,
-  startPaperBot,
+  startBot,
   stopBot,
   updateBotStatus,
 } from "@/features/bots/repository";
@@ -24,12 +25,12 @@ function revalidateApp() {
 
 export async function startBotAction(formData: FormData) {
   const id = String(formData.get("id") ?? "");
-  await startPaperBot(id);
+  await startBot(id);
   revalidateApp();
 }
 
 export async function createBotAction() {
-  createBot("New Paper Grid", defaultBotConfig);
+  createBot("New Local Sim Grid", defaultBotConfig);
   revalidateApp();
 }
 
@@ -41,13 +42,13 @@ export async function pauseBotAction(formData: FormData) {
 
 export async function resumeBotAction(formData: FormData) {
   const id = String(formData.get("id") ?? "");
-  await startPaperBot(id);
+  await startBot(id);
   revalidateApp();
 }
 
 export async function stopBotAction(formData: FormData) {
   const id = String(formData.get("id") ?? "");
-  stopBot(id);
+  await stopBot(id);
   revalidateApp();
 }
 
@@ -83,5 +84,11 @@ export async function simulateFillAction(formData: FormData) {
 export async function reconcilePaperRuntimeAction(formData: FormData) {
   const rawId = String(formData.get("id") ?? "");
   await runPaperReconciliation({ botId: rawId.length > 0 ? rawId : undefined });
+  revalidateApp();
+}
+
+export async function reconcileProprRuntimeAction(formData: FormData) {
+  const id = String(formData.get("id") ?? "");
+  await reconcileProprBot(id);
   revalidateApp();
 }

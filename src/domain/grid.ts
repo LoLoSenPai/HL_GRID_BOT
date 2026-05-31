@@ -1,12 +1,6 @@
 import { decimal, toDecimalString } from "@/domain/decimal";
-import type { GridConfig, GridLevel, OrderSide } from "@/domain/types";
-
-const ASSET_DECIMALS: Record<string, number> = {
-  BTC: 6,
-  ETH: 5,
-  SOL: 4,
-  HYPE: 4,
-};
+import { getMarketQuantityDecimals } from "@/domain/markets";
+import type { GridConfig, GridLevel, OrderSide, PositionSide } from "@/domain/types";
 
 export function generateGridPrices(config: GridConfig): string[] {
   const lower = decimal(config.lowerPrice);
@@ -37,12 +31,16 @@ export function calculateOrderQuantity(
   orderSizeUsd: string,
   price: string,
 ): string {
-  const decimals = ASSET_DECIMALS[asset] ?? 4;
+  const decimals = getMarketQuantityDecimals(asset);
   return toDecimalString(decimal(orderSizeUsd).div(price), decimals);
 }
 
 export function sideForLevel(price: string, referencePrice: string): OrderSide {
   return decimal(price).lte(referencePrice) ? "buy" : "sell";
+}
+
+export function reduceOnlyForGridSide(positionSide: PositionSide, orderSide: OrderSide): boolean {
+  return positionSide === "long" ? orderSide === "sell" : orderSide === "buy";
 }
 
 export function generateGridLevels(

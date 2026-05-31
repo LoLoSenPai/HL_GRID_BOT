@@ -1,4 +1,5 @@
 import type { MarketSymbol } from "@/domain/types";
+import { isBuilderMarket } from "@/domain/markets";
 import type {
   Candle,
   FundingSnapshot,
@@ -48,11 +49,22 @@ export class HyperliquidMarketDataProvider implements MarketDataProvider {
     const allMids = await postInfo<Record<string, string>>({ type: "allMids" });
     const mids: Partial<Record<MarketSymbol, string>> = {};
 
-    for (const asset of assets) {
+    await Promise.all(assets.map(async (asset) => {
       const mid = allMids[asset];
-      if (!mid) throw new Error(`No mid price for ${asset}`);
-      mids[asset] = mid;
-    }
+      if (mid) {
+        mids[asset] = mid;
+        return;
+      }
+
+      if (isBuilderMarket(asset)) {
+        const candles = await this.getCandles(asset, "15m", 6);
+        const lastClose = candles.at(-1)?.close;
+        if (lastClose) mids[asset] = lastClose;
+        return;
+      }
+
+      throw new Error(`No mid price for ${asset}`);
+    }));
 
     return mids;
   }

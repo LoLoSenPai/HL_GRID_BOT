@@ -20,8 +20,8 @@ interface TerminalState {
 
 export const useTerminalStore = create<TerminalState>((set) => ({
   selectedMarket: "BTC",
-  mode: "paper",
-  config: defaultBotConfig,
+  mode: "propr_live",
+  config: { ...defaultBotConfig, mode: "propr_live" },
   liveModeAcknowledged: false,
   killSwitchActive: false,
   setSelectedMarket: (market) =>

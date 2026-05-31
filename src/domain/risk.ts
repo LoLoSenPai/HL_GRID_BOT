@@ -1,5 +1,7 @@
 import { decimal, isPositiveDecimal } from "@/domain/decimal";
 import { isOutOfRange } from "@/domain/grid";
+import { formatMarketSymbol } from "@/domain/markets";
+import { maxProprLeverageForAsset } from "@/domain/propr-rules";
 import type { GridConfig, MarketSymbol, RuntimeMetrics } from "@/domain/types";
 
 export interface RiskIssue {
@@ -48,7 +50,7 @@ export function maxLeverageForAsset(
   asset: string,
   limits: RiskLimits = DEFAULT_RISK_LIMITS,
 ): number {
-  return limits.leverageLimits[asset] ?? limits.defaultMaxLeverage;
+  return limits.leverageLimits[asset] ?? maxProprLeverageForAsset(asset) ?? limits.defaultMaxLeverage;
 }
 
 export function validateBotConfig(
@@ -100,7 +102,7 @@ export function validateBotConfig(
     issues.push({
       code: "leverage_limit",
       severity: "error",
-      message: `${config.pair} leverage must be between 1x and ${maxLeverage}x.`,
+      message: `${formatMarketSymbol(config.pair)} leverage must be between 1x and ${maxLeverage}x.`,
     });
   }
 
@@ -142,7 +144,7 @@ export function validateOrderIntent(
     issues.push({
       code: "order_leverage",
       severity: "error",
-      message: `Order leverage exceeds ${intent.asset} limit of ${maxLeverage}x.`,
+      message: `Order leverage exceeds ${formatMarketSymbol(intent.asset)} limit of ${maxLeverage}x.`,
     });
   }
 

@@ -1,5 +1,6 @@
 import { ulid } from "ulid";
 
+import { isBuilderMarket } from "@/domain/markets";
 import { getEnv } from "@/lib/env";
 import type { MarketSymbol } from "@/domain/types";
 import type { OrderIntent } from "@/features/execution/types";
@@ -76,6 +77,47 @@ export interface ProprLeverageLimits {
   overrides: Record<string, number>;
 }
 
+export interface ProprChallengeAttempt {
+  attemptId: string;
+  challengeId: string;
+  accountId: string;
+  status: string;
+  totalPnl?: string;
+  totalProfitLoss?: string;
+  pnl?: string;
+  winRate?: string;
+  maxDrawdown?: string;
+  tradingDays?: number;
+  currentPhase?: {
+    order?: number;
+    startingBalance?: string;
+    endingBalance?: string | null;
+    status?: string;
+  };
+  phases?: Array<{
+    order?: number;
+    startingBalance?: string;
+    endingBalance?: string | null;
+    status?: string;
+  }>;
+}
+
+export interface ProprAccount {
+  accountId: string;
+  balance?: string;
+  equity?: string;
+  availableBalance?: string;
+  marginBalance?: string;
+  totalUnrealizedPnl?: string;
+  isolatedPositionMargin?: string;
+  highWaterMark?: string;
+  dayStartEquity?: string;
+  dailyStartEquity?: string;
+  startOfDayEquity?: string;
+  totalInitialMargin?: string;
+  totalMaintenanceMargin?: string;
+}
+
 export class ProprClient {
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -121,12 +163,25 @@ export class ProprClient {
   }
 
   async getChallengeAttempts(params: Record<string, string | number> = {}) {
-    const response = await this.request<{ data: Array<{ accountId: string; status: string }> }>(
+    const response = await this.request<{ data: ProprChallengeAttempt[] }>(
       "GET",
       "/challenge-attempts",
       { params: { limit: 20, offset: 0, ...params } },
     );
     return response.data ?? [];
+  }
+
+  async getChallengeAttempt(attemptId: string): Promise<ProprChallengeAttempt> {
+    const response = await this.request<ProprChallengeAttempt | { data: ProprChallengeAttempt }>(
+      "GET",
+      `/challenge-attempts/${attemptId}`,
+    );
+    return "data" in response ? response.data : response;
+  }
+
+  async getAccount(): Promise<ProprAccount> {
+    const response = await this.request<ProprAccount | { data: ProprAccount }>("GET", this.accountPath(""));
+    return "data" in response ? response.data : response;
   }
 
   async getLeverageLimits(): Promise<ProprLeverageLimits> {
@@ -198,7 +253,7 @@ export class ProprClient {
     return response.data ?? [];
   }
 
-  async setLeverage(asset: MarketSymbol, leverage: number, marginMode = "cross") {
+  async setLeverage(asset: MarketSymbol, leverage: number, marginMode = isBuilderMarket(asset) ? "isolated" : "cross") {
     const config = await this.request<{ configId: string }>(
       "GET",
       this.accountPath(`/margin-config/${asset}`),

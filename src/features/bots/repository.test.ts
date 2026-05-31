@@ -32,13 +32,13 @@ beforeEach(() => {
 });
 
 describe("bot repository", () => {
-  it("bootstraps starter bots into SQLite", () => {
-    expect(listBots()).toHaveLength(3);
-    expect(listEvents(10).some((event) => event.type === "system.seeded")).toBe(true);
+  it("bootstraps SQLite without starter bots", () => {
+    expect(listBots()).toHaveLength(0);
+    expect(listEvents(10).some((event) => event.type === "system.seeded")).toBe(false);
   });
 
   it("creates, starts and fills a paper bot", async () => {
-    const bot = createBot("Repository Paper Grid", defaultBotConfig);
+    const bot = createBot("Repository Local Sim Grid", defaultBotConfig);
     await startPaperBot(bot.id);
     simulateNextPaperFill(bot.id);
 
@@ -48,19 +48,19 @@ describe("bot repository", () => {
     expect(Number(metrics.volume)).toBeGreaterThan(0);
   });
 
-  it("reconciles runtime state from persisted paper orders", async () => {
+  it("reconciles runtime state from persisted local simulation orders", async () => {
     const bot = createBot("Repository Reconcile Grid", defaultBotConfig);
     await startPaperBot(bot.id);
 
     const summary = reconcilePaperRuntime({
       botId: bot.id,
-      markPrices: { BTC: "100000" },
+      markPrices: { BTC: "74500" },
       emitEvents: false,
     });
     const runtimeState = getBotRuntimeState(bot.id);
 
     expect(summary.reconciled).toBe(1);
-    expect(runtimeState?.lastPrice).toBe("100000");
+    expect(runtimeState?.lastPrice).toBe("74500");
     expect(Number(runtimeState?.exposure)).toBeGreaterThan(0);
     expect(getBot(bot.id)?.status).toBe("paper");
   });
@@ -80,29 +80,29 @@ describe("bot repository", () => {
     expect(getBot(bot.id)?.status).toBe("paused");
   });
 
-  it("does not start Propr Live from the paper runtime", async () => {
+  it("does not start Propr challenge mode from the local runtime", async () => {
     await expect(
       createAndStartPaperBot("Repository Live Grid", {
         ...defaultBotConfig,
         mode: "propr_live",
       }),
-    ).rejects.toThrow("Propr Live cannot be started by the paper runtime.");
+    ).rejects.toThrow("Challenge mode cannot be started by the local simulation runtime.");
   });
 
-  it("creates a separate Propr Live candidate from a paper bot", async () => {
+  it("creates a separate challenge candidate from a local bot", async () => {
     const paperBot = createBot("Repository Promotion Grid", defaultBotConfig);
 
     const liveCandidate = createLiveCandidateFromBot(paperBot.id);
 
     expect(liveCandidate.id).not.toBe(paperBot.id);
-    expect(liveCandidate.name).toBe("Repository Promotion Grid Live Candidate");
+    expect(liveCandidate.name).toBe("Repository Promotion Grid Challenge Candidate");
     expect(liveCandidate.status).toBe("draft");
     expect(liveCandidate.config.mode).toBe("propr_live");
     expect(liveCandidate.config.autoPauseOutOfRange).toBe(true);
   });
 
-  it("creates a draft Propr Live candidate directly from config", () => {
-    const liveCandidate = createLiveCandidate("Repository Direct Live Candidate", {
+  it("creates a draft challenge candidate directly from config", () => {
+    const liveCandidate = createLiveCandidate("Repository Direct Challenge Candidate", {
       ...defaultBotConfig,
       mode: "propr_live",
       autoPauseOutOfRange: false,

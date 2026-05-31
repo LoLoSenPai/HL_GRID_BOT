@@ -1,7 +1,7 @@
 import { ulid } from "ulid";
 
 import { decimal, toDecimalString } from "@/domain/decimal";
-import { generateGridLevels, isOutOfRange } from "@/domain/grid";
+import { generateGridLevels, isOutOfRange, reduceOnlyForGridSide } from "@/domain/grid";
 import type { GridConfig, GridLevel, RuntimeMetrics } from "@/domain/types";
 import type { ExecutionOrder } from "@/features/execution/types";
 import { PaperExecutionAdapter } from "@/features/execution/paper-adapter";
@@ -30,12 +30,12 @@ export class PaperGridEngine {
           gridLevelId: level.id,
           asset: config.pair,
           side: level.side,
-          positionSide: "long",
+          positionSide: config.positionSide,
           type: "limit",
           quantity: level.quantity,
           price: level.price,
           timeInForce: "GTC",
-          reduceOnly: level.side === "sell",
+          reduceOnly: reduceOnlyForGridSide(config.positionSide, level.side),
         }),
       );
     }

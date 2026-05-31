@@ -1,7 +1,9 @@
 import { ulid } from "ulid";
 
 import { decimal, toDecimalString } from "@/domain/decimal";
-import { generateGridLevels, isOutOfRange } from "@/domain/grid";
+import { generateGridLevels, isOutOfRange, reduceOnlyForGridSide } from "@/domain/grid";
+import { estimateGridPreview } from "@/domain/grid-preview";
+import { formatMarketSymbol } from "@/domain/markets";
 import type {
   ActivityEvent,
   Bot,
@@ -11,13 +13,18 @@ import type {
   OrderSide,
   RuntimeMetrics,
   TradingMode,
+  PositionSide,
 } from "@/domain/types";
 import { validateBotConfig } from "@/domain/risk";
 import { getSqlite } from "@/db/client";
 import { ensureDatabase } from "@/db/init";
-import { defaultBotConfig, sampleBots } from "@/features/bots/sample-data";
+import { defaultBotConfig } from "@/features/bots/sample-data";
 import { PaperGridEngine } from "@/features/paper-trading/engine";
+import { ProprExecutionAdapter } from "@/features/execution/propr-adapter";
 import type { ExecutionOrder } from "@/features/execution/types";
+import { getMarketSnapshots } from "@/features/market-data/service";
+import { getProprChallengeSummary } from "@/features/propr/challenge-summary";
+import { checkProprLiveReadiness } from "@/features/propr/readiness";
 
 interface BotJoinedRow {
   id: string;
@@ -27,6 +34,7 @@ interface BotJoinedRow {
   pair: MarketSymbol;
   created_at: string;
   updated_at: string;
+  position_side: PositionSide;
   lower_price: string;
   upper_price: string;
   grid_count: number;
@@ -62,10 +70,13 @@ interface RuntimeStateRow {
   updated_at: string;
 }
 
+const LEGACY_SAMPLE_BOT_IDS = ["bot_btc_range_v1", "bot_eth_compact", "bot_sol_lab"];
+
 export interface PersistedOrder {
   id: string;
   bot_id: string | null;
   grid_level_id: string | null;
+  provider_order_id: string | null;
   intent_id: string;
   asset: MarketSymbol;
   side: OrderSide;
@@ -121,21 +132,35 @@ export interface PaperReconciliationSummary {
 
 export function bootstrapBots() {
   ensureDatabase();
-  const db = getSqlite();
-  const count = db.prepare("SELECT COUNT(*) AS count FROM bots").get() as { count: number };
-  if (count.count > 0) return;
+  removeLegacySampleBots();
+}
 
-  const insert = db.transaction(() => {
-    for (const bot of sampleBots) {
-      insertBotRows(bot.name, bot.config, bot.id, bot.status, bot.createdAt);
+function removeLegacySampleBots() {
+  const db = getSqlite();
+  const existing = db
+    .prepare(`SELECT id FROM bots WHERE id IN (${LEGACY_SAMPLE_BOT_IDS.map(() => "?").join(", ")})`)
+    .all(...LEGACY_SAMPLE_BOT_IDS) as Array<{ id: string }>;
+
+  const tx = db.transaction(() => {
+    for (const { id } of existing) {
+      db.prepare("DELETE FROM fills WHERE bot_id = ?").run(id);
+      db.prepare("DELETE FROM orders WHERE bot_id = ?").run(id);
+      db.prepare("DELETE FROM events WHERE bot_id = ?").run(id);
+      db.prepare("DELETE FROM bot_runtime_state WHERE bot_id = ?").run(id);
+      db.prepare("DELETE FROM bot_configs WHERE bot_id = ?").run(id);
+      db.prepare("DELETE FROM bots WHERE id = ?").run(id);
     }
-    addEvent({
-      type: "system.seeded",
-      severity: "success",
-      message: "SQLite persistence initialized with starter bots.",
-    });
+    return db.prepare("DELETE FROM events WHERE type = 'system.seeded'").run().changes;
   });
-  insert();
+  const removedSeedEvents = tx();
+  if (!existing.length && removedSeedEvents === 0) return;
+
+  addEvent({
+    type: "system.legacy_samples_removed",
+    severity: "info",
+    message: "Legacy starter bots were removed from local persistence.",
+    payload: { removedBotIds: existing.map((item) => item.id) },
+  });
 }
 
 export function listBots(): Bot[] {
@@ -144,7 +169,7 @@ export function listBots(): Bot[] {
     .prepare(
       `
       SELECT b.*, c.lower_price, c.upper_price, c.grid_count, c.capital_allocation,
-        c.leverage, c.spacing, c.order_size, c.take_profit, c.stop_loss,
+        c.position_side, c.leverage, c.spacing, c.order_size, c.take_profit, c.stop_loss,
         c.max_drawdown_pct, c.auto_pause_out_of_range, c.auto_recenter
       FROM bots b
       JOIN bot_configs c ON c.bot_id = b.id
@@ -161,7 +186,7 @@ export function getBot(id: string): Bot | null {
     .prepare(
       `
       SELECT b.*, c.lower_price, c.upper_price, c.grid_count, c.capital_allocation,
-        c.leverage, c.spacing, c.order_size, c.take_profit, c.stop_loss,
+        c.position_side, c.leverage, c.spacing, c.order_size, c.take_profit, c.stop_loss,
         c.max_drawdown_pct, c.auto_pause_out_of_range, c.auto_recenter
       FROM bots b
       JOIN bot_configs c ON c.bot_id = b.id
@@ -225,7 +250,7 @@ export function createLiveCandidate(
     botId: bot.id,
     type: "bot.live_candidate_created",
     severity: "warning",
-    message: `${bot.name} created as a Propr Live candidate. Start remains disabled until guarded live runtime is enabled.`,
+    message: `${bot.name} created as a Propr challenge candidate.`,
     payload,
   });
 
@@ -237,7 +262,7 @@ export function createLiveCandidateFromBot(id: string): Bot {
   if (!bot) throw new Error("Bot not found.");
 
   return createLiveCandidate(liveCandidateName(bot.name), bot.config, {
-    source: "paper_bot",
+    source: "local_sim_bot",
     sourceBotId: bot.id,
   });
 }
@@ -272,7 +297,7 @@ export function deleteBot(id: string) {
 
 export async function createAndStartPaperBot(name: string, config: GridConfig): Promise<Bot> {
   if (config.mode === "propr_live") {
-    throw new Error("Propr Live cannot be started by the paper runtime.");
+    throw new Error("Challenge mode cannot be started by the local simulation runtime.");
   }
 
   const bot = createBot(name, config);
@@ -282,11 +307,31 @@ export async function createAndStartPaperBot(name: string, config: GridConfig): 
   return updated;
 }
 
+export async function createAndStartProprBot(name: string, config: GridConfig): Promise<Bot> {
+  await assertChallengeRiskBudget("", config);
+  const bot = createBot(name, {
+    ...config,
+    mode: "propr_live",
+    autoPauseOutOfRange: true,
+    autoRecenter: false,
+  });
+  await startProprBot(bot.id);
+  const updated = getBot(bot.id);
+  if (!updated) throw new Error("Started Propr bot was not found.");
+  return updated;
+}
+
+export async function startBot(id: string) {
+  const bot = getBot(id);
+  if (!bot) throw new Error("Bot not found.");
+  return bot.config.mode === "propr_live" ? startProprBot(id) : startPaperBot(id);
+}
+
 export async function startPaperBot(id: string) {
   const bot = getBot(id);
   if (!bot) throw new Error("Bot not found.");
   if (bot.config.mode === "propr_live") {
-    throw new Error("Propr Live cannot be started from the paper runtime.");
+    throw new Error("Challenge mode cannot be started from the local simulation runtime.");
   }
 
   const referencePrice = midpoint(bot.config);
@@ -321,14 +366,120 @@ export async function startPaperBot(id: string) {
       botId: id,
       type: "bot.started",
       severity: status === "out_of_range" ? "warning" : "success",
-      message: `${bot.name} started with ${state.orders.length} paper orders.`,
+      message: `${bot.name} started with ${state.orders.length} local simulation orders.`,
       payload: { referencePrice, orderCount: state.orders.length },
     });
   });
   tx();
 }
 
-export function stopBot(id: string) {
+export async function startProprBot(id: string) {
+  const bot = getBot(id);
+  if (!bot) throw new Error("Bot not found.");
+  if (bot.config.mode !== "propr_live") {
+    throw new Error("Only Propr Challenge bots can be started by the Propr runtime.");
+  }
+
+  const readiness = await checkProprLiveReadiness();
+  if (!readiness.liveEnabled) {
+    throw new Error(`Propr challenge execution is blocked: ${readiness.blockers[0] ?? "readiness check failed"}`);
+  }
+
+  const [market] = await getMarketSnapshots([bot.config.pair]);
+  const referencePrice = market?.mid;
+  if (!referencePrice || decimal(referencePrice).lte(0)) {
+    throw new Error(`No valid market price for ${formatMarketSymbol(bot.config.pair)}.`);
+  }
+
+  const riskIssues = validateBotConfig(bot.config).filter((issue) => issue.severity === "error");
+  if (riskIssues.length) throw new Error(riskIssues[0].message);
+  if (bot.config.autoPauseOutOfRange && isOutOfRange(bot.config, referencePrice)) {
+    throw new Error(`Current ${formatMarketSymbol(bot.config.pair)} price is outside the configured grid range.`);
+  }
+  await assertChallengeRiskBudget(bot.id, bot.config);
+
+  const adapter = new ProprExecutionAdapter();
+  const health = await adapter.health();
+  if (!health.ok) throw new Error(health.reason ?? "Propr adapter is not healthy.");
+  await adapter.setLeverage(bot.config.pair, bot.config.leverage);
+
+  const entryLevels = generateGridLevels(bot.config, referencePrice).filter(
+    (level) => !reduceOnlyForGridSide(bot.config.positionSide, level.side),
+  );
+  if (!entryLevels.length) {
+    throw new Error("No entry grid levels are available at the current mark price.");
+  }
+
+  const placedOrders: ExecutionOrder[] = [];
+  try {
+    for (const level of entryLevels) {
+      const order = await adapter.placeOrder({
+        clientOrderId: ulid(),
+        botId: bot.id,
+        gridLevelId: level.id,
+        asset: bot.config.pair,
+        side: level.side,
+        positionSide: bot.config.positionSide,
+        type: "limit",
+        quantity: level.quantity,
+        price: level.price,
+        timeInForce: "GTC",
+        reduceOnly: false,
+      });
+      placedOrders.push(order);
+    }
+  } catch (error) {
+    for (const order of placedOrders) {
+      await adapter.cancelOrder(order.id).catch(() => null);
+    }
+    updateBotStatus(bot.id, "error");
+    addEvent({
+      botId: bot.id,
+      type: "bot.propr_start_failed",
+      severity: "error",
+      message: `Propr bot deployment failed: ${error instanceof Error ? error.message : "unknown error"}`,
+      payload: { cancelledPlacedOrders: placedOrders.length },
+    });
+    throw error;
+  }
+
+  const now = new Date().toISOString();
+  const tx = getSqlite().transaction(() => {
+    getSqlite().prepare("DELETE FROM orders WHERE bot_id = ? AND status = 'open'").run(bot.id);
+    for (const order of placedOrders) insertOrder(order);
+    getSqlite().prepare("UPDATE bots SET status = 'live', updated_at = ? WHERE id = ?").run(now, bot.id);
+    getSqlite()
+      .prepare(
+        `
+        UPDATE bot_runtime_state
+        SET state = 'live', last_price = ?, equity = ?, pnl = ?, exposure = ?, drawdown_pct = ?, updated_at = ?
+        WHERE bot_id = ?
+      `,
+      )
+      .run(referencePrice, bot.config.capitalAllocation, "0", openOrderExposure(placedOrders), "0", now, bot.id);
+    addEvent({
+      botId: bot.id,
+      type: "bot.propr_started",
+      severity: "success",
+      message: `${bot.name} deployed on the active Propr challenge with ${placedOrders.length} entry orders.`,
+      payload: { referencePrice, orderCount: placedOrders.length },
+    });
+  });
+  tx();
+}
+
+export async function stopBot(id: string) {
+  const bot = getBot(id);
+  if (!bot) throw new Error("Bot not found.");
+
+  if (bot.config.mode === "propr_live") {
+    const adapter = new ProprExecutionAdapter();
+    const openOrders = listOrders(id).filter((order) => order.status === "open");
+    for (const order of openOrders) {
+      await adapter.cancelOrder(order.provider_order_id ?? order.id).catch(() => null);
+    }
+  }
+
   bootstrapBots();
   const now = new Date().toISOString();
   const tx = getSqlite().transaction(() => {
@@ -343,10 +494,106 @@ export function stopBot(id: string) {
       botId: id,
       type: "bot.stopped",
       severity: "warning",
-      message: "Bot stopped and open paper orders cancelled.",
+      message: bot.config.mode === "propr_live" ? "Bot stopped and open Propr orders cancelled." : "Bot stopped and open local orders cancelled.",
     });
   });
   tx();
+}
+
+export async function reconcileProprBot(id: string): Promise<{ syncedOrders: number; insertedFills: number; placedExitOrders: number }> {
+  const bot = getBot(id);
+  if (!bot) throw new Error("Bot not found.");
+  if (bot.config.mode !== "propr_live") {
+    throw new Error("Only Propr challenge bots can use Propr reconciliation.");
+  }
+
+  const adapter = new ProprExecutionAdapter();
+  const [openProviderOrders, trades] = await Promise.all([
+    adapter.getOpenOrders(bot.config.pair),
+    adapter.getTrades(bot.config.pair),
+  ]);
+  const openProviderIds = new Set(openProviderOrders.map((order) => order.providerOrderId ?? order.id));
+  const persistedOrders = listOrders(bot.id);
+  const now = new Date().toISOString();
+  let syncedOrders = 0;
+  let insertedFills = 0;
+  let placedExitOrders = 0;
+
+  for (const order of persistedOrders.filter((item) => item.status === "open")) {
+    const providerOrderId = order.provider_order_id ?? order.id;
+    const providerTrades = trades.filter((trade) => trade.orderId === providerOrderId);
+    if (openProviderIds.has(providerOrderId) || providerTrades.length === 0) continue;
+
+    const cumulativeQuantity = providerTrades.reduce((total, trade) => total.plus(trade.quantity), decimal(0));
+    const notional = providerTrades.reduce((total, trade) => total.plus(decimal(trade.quantity).mul(trade.price)), decimal(0));
+    const averageFillPrice = cumulativeQuantity.gt(0) ? notional.div(cumulativeQuantity) : decimal(order.price ?? "0");
+
+    getSqlite()
+      .prepare(
+        `
+        UPDATE orders SET status = 'filled', cumulative_quantity = ?, average_fill_price = ?, updated_at = ?
+        WHERE id = ?
+      `,
+      )
+      .run(toDecimalString(cumulativeQuantity, 8), toDecimalString(averageFillPrice, 8), now, order.id);
+    syncedOrders += 1;
+
+    for (const trade of providerTrades) {
+      const result = getSqlite()
+        .prepare(
+          `
+          INSERT OR IGNORE INTO fills (
+            id, bot_id, order_id, provider_trade_id, asset, side, quantity, price, fee, realized_pnl, executed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        )
+        .run(
+          trade.id,
+          bot.id,
+          order.id,
+          trade.providerTradeId ?? trade.id,
+          trade.asset,
+          trade.side,
+          trade.quantity,
+          trade.price,
+          trade.fee,
+          trade.realizedPnl,
+          trade.executedAt,
+        );
+      insertedFills += result.changes;
+    }
+
+    if (order.reduce_only === 0) {
+      const exitIntent = pairedOrder(bot.config, order);
+      const placedExitOrder = await adapter.placeOrder({
+        clientOrderId: ulid(),
+        botId: bot.id,
+        gridLevelId: exitIntent.gridLevelId,
+        asset: exitIntent.asset,
+        side: exitIntent.side,
+        positionSide: exitIntent.positionSide,
+        type: exitIntent.type,
+        quantity: exitIntent.quantity,
+        price: exitIntent.price,
+        timeInForce: "GTC",
+        reduceOnly: true,
+      });
+      insertOrder(placedExitOrder);
+      placedExitOrders += 1;
+    }
+  }
+
+  const [market] = await getMarketSnapshots([bot.config.pair]);
+  updateRuntimeFromAggregates(bot.id, market?.mid ?? midpoint(bot.config));
+  addEvent({
+    botId: bot.id,
+    type: "bot.propr_reconciled",
+    severity: "success",
+    message: `Propr sync complete: ${syncedOrders} filled orders, ${insertedFills} new fills, ${placedExitOrders} exit orders.`,
+    payload: { syncedOrders, insertedFills, placedExitOrders },
+  });
+
+  return { syncedOrders, insertedFills, placedExitOrders };
 }
 
 export function simulateNextPaperFill(id: string) {
@@ -405,7 +652,7 @@ export function simulateNextPaperFill(id: string) {
       botId: id,
       type: "order.filled",
       severity: "success",
-      message: `${order.side.toUpperCase()} ${order.quantity} ${order.asset} filled at ${fillPrice}.`,
+      message: `${order.side.toUpperCase()} ${order.quantity} ${formatMarketSymbol(order.asset)} filled at ${fillPrice}.`,
       payload: { pairedOrderId: nextOrder.id, notional: toDecimalString(notional, 2) },
     });
   });
@@ -552,15 +799,16 @@ function insertBotRows(name: string, config: GridConfig, id: string, status: Bot
     .prepare(
       `
       INSERT INTO bot_configs (
-        id, bot_id, lower_price, upper_price, grid_count, capital_allocation,
+        id, bot_id, position_side, lower_price, upper_price, grid_count, capital_allocation,
         leverage, spacing, order_size, take_profit, stop_loss, max_drawdown_pct,
         auto_pause_out_of_range, auto_recenter, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     )
     .run(
       `cfg_${ulid().toLowerCase()}`,
       id,
+      config.positionSide,
       config.lowerPrice,
       config.upperPrice,
       config.gridCount,
@@ -711,8 +959,8 @@ function reconcileSinglePaperBot(
         severity: openOrders.length === 0 || outOfRange ? "warning" : "success",
         message:
           openOrders.length === 0
-            ? "Paper runtime reconciled and paused because no open orders were persisted."
-            : `Paper runtime reconciled from ${openOrders.length} open orders.`,
+            ? "Local simulation runtime reconciled and paused because no open orders were persisted."
+            : `Local simulation runtime reconciled from ${openOrders.length} open orders.`,
         payload: {
           markPrice: resolvedMarkPrice,
           openOrders: openOrders.length,
@@ -745,16 +993,71 @@ function pairedOrder(config: GridConfig, filled: PersistedOrder): ExecutionOrder
     gridLevelId: level.id,
     asset: config.pair,
     side,
-    positionSide: "long",
+    positionSide: config.positionSide,
     type: "limit",
     quantity: level.quantity,
     price: level.price,
     status: "open",
     cumulativeQuantity: "0",
-    reduceOnly: side === "sell",
+    reduceOnly: reduceOnlyForGridSide(config.positionSide, side),
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function openOrderExposure(orders: ExecutionOrder[]): string {
+  return toDecimalString(
+    orders.reduce((total, order) => {
+      if (!order.price) return total;
+      return total.plus(decimal(order.quantity).mul(order.price));
+    }, decimal(0)),
+    2,
+  );
+}
+
+async function assertChallengeRiskBudget(botId: string, config: GridConfig) {
+  if (!config.stopLoss) {
+    throw new Error("Stop loss is required before deploying a Propr challenge bot.");
+  }
+
+  const challenge = await getProprChallengeSummary(getRuntimeMetrics());
+  if (challenge.source !== "propr_live") {
+    throw new Error(challenge.warning ?? "Active Propr challenge could not be synced.");
+  }
+
+  const candidateWorstCase = decimal(estimateGridPreview(config).worstCaseLoss);
+  if (!candidateWorstCase.gt(0)) {
+    throw new Error("Worst-case loss must be positive and directionally valid before deployment.");
+  }
+
+  const committedWorstCase = listBots()
+    .filter(
+      (bot) =>
+        bot.id !== botId &&
+        bot.config.mode === "propr_live" &&
+        ["live", "running", "out_of_range"].includes(bot.status),
+    )
+    .reduce((total, bot) => total.plus(estimateGridPreview(bot.config).worstCaseLoss), decimal(0));
+
+  const totalWorstCase = committedWorstCase.plus(candidateWorstCase);
+  const dailyRemaining = remainingFromUsage(challenge.dailyLossLimit, challenge.dailyLossUsedPct);
+  const drawdownBudget = decimal(challenge.highWaterMark).minus(challenge.drawdownLimit);
+  const drawdownRemaining = drawdownBudget.mul(decimal(100).minus(challenge.drawdownUsedPct)).div(100);
+  const hardBudget = DecimalMin(dailyRemaining, drawdownRemaining);
+
+  if (totalWorstCase.gt(hardBudget)) {
+    throw new Error(
+      `Bot worst-case risk ${toDecimalString(totalWorstCase, 2)} USDC exceeds remaining challenge risk budget ${toDecimalString(hardBudget, 2)} USDC.`,
+    );
+  }
+}
+
+function remainingFromUsage(limit: string, usedPct: string) {
+  return decimal(limit).mul(decimal(100).minus(usedPct)).div(100);
+}
+
+function DecimalMin(a: ReturnType<typeof decimal>, b: ReturnType<typeof decimal>) {
+  return a.lte(b) ? a : b;
 }
 
 function midpoint(config: GridConfig): string {
@@ -762,7 +1065,7 @@ function midpoint(config: GridConfig): string {
 }
 
 function liveCandidateName(name: string): string {
-  return name.includes("Live Candidate") ? `${name} Copy` : `${name} Live Candidate`;
+  return name.includes("Challenge Candidate") ? `${name} Copy` : `${name} Challenge Candidate`;
 }
 
 function mapBot(row: BotJoinedRow): Bot {
@@ -774,6 +1077,7 @@ function mapBot(row: BotJoinedRow): Bot {
     updatedAt: row.updated_at,
     config: {
       pair: row.pair,
+      positionSide: row.position_side ?? "long",
       lowerPrice: row.lower_price,
       upperPrice: row.upper_price,
       gridCount: row.grid_count,

@@ -3,9 +3,9 @@ import type { BotStatus } from "@/domain/types";
 
 const labels: Record<BotStatus, string> = {
   draft: "Draft",
-  paper: "Paper",
+  paper: "Local",
   running: "Running",
-  live: "Live",
+  live: "Challenge",
   paused: "Paused",
   out_of_range: "Out of range",
   error: "Error",

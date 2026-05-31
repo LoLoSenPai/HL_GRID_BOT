@@ -8,9 +8,11 @@ import { StatusBadge } from "@/components/trading/status-badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { formatMarketPair } from "@/domain/markets";
 import {
   createLiveCandidateAction,
   reconcilePaperRuntimeAction,
+  reconcileProprRuntimeAction,
   simulateFillAction,
   startBotAction,
   stopBotAction,
@@ -36,25 +38,25 @@ export default async function BotDetailPage({ params }: { params: Promise<{ id: 
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-normal">{bot.name}</h1>
-          <p className="text-sm text-muted-foreground">{bot.config.pair}/USDC grid configuration and runtime state.</p>
+          <p className="text-sm text-muted-foreground">{formatMarketPair(bot.config.pair)} grid configuration and runtime state.</p>
         </div>
         <div className="flex items-center gap-2">
           <StatusBadge status={bot.status} />
           <form action={startBotAction}>
             <input type="hidden" name="id" value={bot.id} />
-            <Button type="submit" disabled={isLiveCandidate}>Start</Button>
+            <Button type="submit">{isLiveCandidate ? "Deploy" : "Start"}</Button>
           </form>
           <form action={simulateFillAction}>
             <input type="hidden" name="id" value={bot.id} />
-            <Button type="submit" variant="outline" disabled={!openOrders.length}>
+            <Button type="submit" variant="outline" disabled={isLiveCandidate || !openOrders.length}>
               Fill
             </Button>
           </form>
-          <form action={reconcilePaperRuntimeAction}>
+          <form action={isLiveCandidate ? reconcileProprRuntimeAction : reconcilePaperRuntimeAction}>
             <input type="hidden" name="id" value={bot.id} />
             <Button type="submit" variant="outline">
               <RefreshCw />
-              Reconcile
+              {isLiveCandidate ? "Sync Propr" : "Reconcile"}
             </Button>
           </form>
           {!isLiveCandidate ? (
@@ -62,7 +64,7 @@ export default async function BotDetailPage({ params }: { params: Promise<{ id: 
               <input type="hidden" name="id" value={bot.id} />
               <Button type="submit" variant="outline">
                 <Rocket />
-                Live candidate
+                Challenge candidate
               </Button>
             </form>
           ) : null}
@@ -73,12 +75,12 @@ export default async function BotDetailPage({ params }: { params: Promise<{ id: 
         </div>
       </div>
       {isLiveCandidate ? (
-        <Alert variant="destructive">
+        <Alert>
           <Rocket className="size-4" />
-          <AlertTitle>Live candidate only</AlertTitle>
+          <AlertTitle>Propr challenge execution</AlertTitle>
           <AlertDescription>
-            This bot uses the Propr live execution profile, but live start is disabled until guarded live runtime,
-            reconciliation and kill switch controls are complete.
+            Deploy places the initial entry side of the grid on the active challenge. Sync Propr adds reduce-only exit
+            orders after fills.
           </AlertDescription>
         </Alert>
       ) : null}

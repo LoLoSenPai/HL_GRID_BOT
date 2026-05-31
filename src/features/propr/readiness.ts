@@ -1,4 +1,4 @@
-import { createProprClient, ProprAPIError } from "@/features/propr/client";
+import { createProprClient, ProprAPIError, type ProprLeverageLimits } from "@/features/propr/client";
 import { getEnv, redactSecret } from "@/lib/env";
 
 export interface ProprLiveReadiness {
@@ -15,10 +15,7 @@ export interface ProprLiveReadiness {
   authenticated: boolean;
   activeChallengeCount: number;
   activeAccountId?: string;
-  leverageLimits: {
-    defaultMax?: number;
-    overrides: Record<string, number>;
-  } | null;
+  leverageLimits: ProprLeverageLimits | null;
   liveEnabled: boolean;
   blockers: string[];
   warnings: string[];

@@ -3,6 +3,7 @@ import { ulid } from "ulid";
 import { getSqlite } from "@/db/client";
 import { ensureDatabase } from "@/db/init";
 import { decimal, toDecimalString } from "@/domain/decimal";
+import { isBuilderMarket } from "@/domain/markets";
 import { SUPPORTED_MARKETS, type GridConfig, type MarketSnapshot, type MarketSymbol } from "@/domain/types";
 import { sampleMarkets } from "@/features/bots/sample-data";
 import { createMarketDataProvider, HyperliquidMarketDataProvider } from "@/features/market-data/hyperliquid-provider";
@@ -93,20 +94,22 @@ async function loadMarketSnapshots(assets: readonly MarketSymbol[]): Promise<Mar
   const timestamp = Date.now();
 
   if (provider instanceof HyperliquidMarketDataProvider) {
-    const [mids, fundingSnapshots] = await Promise.all([
+    const [mids, fundingSnapshots, builderContexts] = await Promise.all([
       provider.getMids(assets),
       provider.getFundingSnapshots(assets),
+      loadBuilderCandleContexts(provider, assets.filter(isBuilderMarket)),
     ]);
 
     return assets.map((asset) => {
-      const mid = mids[asset];
+      const builderContext = builderContexts.get(asset);
+      const mid = mids[asset] ?? builderContext?.mid;
       if (!mid) throw new Error(`No mid price for ${asset}`);
       return {
         asset,
         mid,
         funding: fundingSnapshots[asset]?.fundingRate ?? "0",
-        change24hPct: change24hPct(mid, fundingSnapshots[asset]?.previousDayPrice),
-        volume24h: fundingSnapshots[asset]?.dayNotionalVolume,
+        change24hPct: change24hPct(mid, fundingSnapshots[asset]?.previousDayPrice ?? builderContext?.previousDayPrice),
+        volume24h: fundingSnapshots[asset]?.dayNotionalVolume ?? builderContext?.dayNotionalVolume,
         timestamp,
       };
     });
@@ -130,11 +133,54 @@ async function loadMarketSnapshots(assets: readonly MarketSymbol[]): Promise<Mar
   );
 }
 
+async function loadBuilderCandleContexts(
+  provider: HyperliquidMarketDataProvider,
+  assets: readonly MarketSymbol[],
+): Promise<Map<MarketSymbol, { mid?: string; previousDayPrice?: string; dayNotionalVolume?: string }>> {
+  const entries = await Promise.all(
+    assets.map(async (asset) => {
+      try {
+        const candles = await provider.getCandles(asset, "1h", 24);
+        const first = candles[0];
+        const last = candles.at(-1);
+        const volume = candles.reduce((total, candle) => total.plus(candle.volume || "0"), decimal(0));
+        return [
+          asset,
+          {
+            mid: last?.close,
+            previousDayPrice: first?.open,
+            dayNotionalVolume: toDecimalString(volume, 2),
+          },
+        ] as const;
+      } catch (error) {
+        logger.warn("market_data.builder_context_failed", {
+          asset,
+          error: errorMessage(error),
+        });
+        return [asset, undefined] as const;
+      }
+    }),
+  );
+
+  const contexts = new Map<
+    MarketSymbol,
+    { mid?: string; previousDayPrice?: string; dayNotionalVolume?: string }
+  >();
+  for (const [asset, context] of entries) {
+    if (context) contexts.set(asset, context);
+  }
+  return contexts;
+}
+
 function fallbackMarketSnapshots(assets: readonly MarketSymbol[]): MarketSnapshot[] {
   const timestamp = Date.now();
+  const cached = latestCachedMarketSnapshots(assets);
   const samples = new Map(sampleMarkets.map((market) => [market.asset, market]));
 
   return assets.map((asset) => {
+    const cachedSnapshot = cached.get(asset);
+    if (cachedSnapshot) return cachedSnapshot;
+
     const sample = samples.get(asset);
     return {
       asset,
@@ -145,6 +191,52 @@ function fallbackMarketSnapshots(assets: readonly MarketSymbol[]): MarketSnapsho
       timestamp,
     };
   });
+}
+
+function latestCachedMarketSnapshots(assets: readonly MarketSymbol[]): Map<MarketSymbol, MarketSnapshot> {
+  try {
+    ensureDatabase();
+    const snapshots = new Map<MarketSymbol, MarketSnapshot>();
+    const db = getSqlite();
+
+    for (const asset of assets) {
+      const row = db
+        .prepare(
+          `
+          SELECT asset, mid, funding, payload, created_at
+          FROM market_snapshots
+          WHERE asset = ?
+          ORDER BY created_at DESC
+          LIMIT 1
+        `,
+        )
+        .get(asset) as
+        | {
+            asset: MarketSymbol;
+            mid: string;
+            funding: string | null;
+            payload: string | null;
+            created_at: string;
+          }
+        | undefined;
+
+      if (!row) continue;
+      const payload = row.payload ? (JSON.parse(row.payload) as Partial<MarketSnapshot>) : {};
+      snapshots.set(asset, {
+        asset,
+        mid: row.mid,
+        funding: row.funding ?? undefined,
+        change24hPct: payload.change24hPct,
+        volume24h: payload.volume24h,
+        timestamp: Date.parse(row.created_at) || Date.now(),
+      });
+    }
+
+    return snapshots;
+  } catch (error) {
+    logger.warn("market_data.cached_snapshot_fallback_failed", { error: errorMessage(error) });
+    return new Map();
+  }
 }
 
 function persistMarketSnapshots(snapshots: MarketSnapshot[]) {

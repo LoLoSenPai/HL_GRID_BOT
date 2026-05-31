@@ -1,4 +1,5 @@
 import type { MarketSnapshot } from "@/domain/types";
+import { formatMarketDescription, formatMarketPair, formatMarketSymbol } from "@/domain/markets";
 import { cn } from "@/lib/utils";
 import {
   Table,
@@ -29,8 +30,10 @@ export function MarketOverviewTable({ markets }: { markets: MarketSnapshot[] }) 
         {markets.map((market) => (
           <TableRow key={market.asset}>
             <TableCell>
-              <div className="font-medium">{market.asset}</div>
-              <div className="text-xs text-muted-foreground">{market.asset}/USDC perp</div>
+              <div className="font-medium">{formatMarketSymbol(market.asset)}</div>
+              <div className="text-xs text-muted-foreground">
+                {formatMarketPair(market.asset)} - {formatMarketDescription(market.asset)}
+              </div>
             </TableCell>
             <TableCell className="metric-mono text-right">{formatPrice(market.mid)}</TableCell>
             <TableCell className={cn("metric-mono text-right", changeTone(market.change24hPct))}>

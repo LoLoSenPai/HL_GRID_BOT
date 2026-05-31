@@ -1,4 +1,5 @@
 import { Card, CardContent } from "@/components/ui/card";
+import { formatMarketPair } from "@/domain/markets";
 import type { MarketSnapshot } from "@/domain/types";
 
 export function MarketTape({ markets }: { markets: MarketSnapshot[] }) {
@@ -8,7 +9,7 @@ export function MarketTape({ markets }: { markets: MarketSnapshot[] }) {
         <Card key={market.asset} className="rounded-lg">
           <CardContent className="flex items-center justify-between p-3">
             <div>
-              <div className="text-xs text-muted-foreground">{market.asset}/USDC</div>
+              <div className="text-xs text-muted-foreground">{formatMarketPair(market.asset)}</div>
               <div className="metric-mono text-lg font-semibold">{market.mid}</div>
             </div>
             <div className="text-right">

@@ -1,11 +1,13 @@
 import { ActivityFeed } from "@/components/activity/activity-feed";
 import { BotTable } from "@/components/bots/bot-table";
+import { ChallengePanel } from "@/components/trading/challenge-panel";
 import { MarketOverviewTable } from "@/components/trading/market-overview-table";
 import { MetricCard } from "@/components/trading/metric-card";
 import { RiskPanel } from "@/components/trading/risk-panel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getRuntimeMetrics, listBots, listEvents } from "@/features/bots/repository";
 import { getMarketSnapshots } from "@/features/market-data/service";
+import { getProprChallengeSummary } from "@/features/propr/challenge-summary";
 
 export const dynamic = "force-dynamic";
 
@@ -14,8 +16,9 @@ export default async function DashboardPage() {
   const bots = listBots();
   const events = listEvents(3);
   const metrics = getRuntimeMetrics();
+  const challengePromise = getProprChallengeSummary(metrics);
   const activeBots = bots.filter((bot) => ["paper", "running", "live", "out_of_range"].includes(bot.status)).length;
-  const markets = await marketsPromise;
+  const [markets, challenge] = await Promise.all([marketsPromise, challengePromise]);
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-auto p-4 lg:p-6">
@@ -27,11 +30,13 @@ export default async function DashboardPage() {
       </div>
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <MetricCard label="Equity" value={`${metrics.equity} USDC`} detail="Paper account baseline" />
+        <MetricCard label="Equity" value={`${metrics.equity} USDC`} detail="Local runtime baseline" />
         <MetricCard label="PnL" value={`${Number(metrics.pnl) >= 0 ? "+" : ""}${metrics.pnl} USDC`} detail="Realized and unrealized" />
-        <MetricCard label="Volume generated" value={`${metrics.volume} USDC`} detail="Persisted paper fills" />
+        <MetricCard label="Volume generated" value={`${metrics.volume} USDC`} detail="Persisted fills" />
         <MetricCard label="Active bots" value={String(activeBots)} detail={`${bots.length} total bots`} />
       </div>
+
+      <ChallengePanel challenge={challenge} />
 
       <Card className="rounded-lg">
         <CardHeader>

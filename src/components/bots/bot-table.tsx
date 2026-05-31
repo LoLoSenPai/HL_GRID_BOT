@@ -11,6 +11,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { StatusBadge } from "@/components/trading/status-badge";
+import { formatMarketSymbol } from "@/domain/markets";
 import type { Bot } from "@/domain/types";
 import {
   createLiveCandidateAction,
@@ -41,7 +42,7 @@ export function BotTable({ bots }: { bots: Bot[] }) {
           {bots.map((bot) => (
             <TableRow key={bot.id}>
               <TableCell className="font-medium">{bot.name}</TableCell>
-              <TableCell className="metric-mono">{bot.config.pair}</TableCell>
+              <TableCell className="metric-mono">{formatMarketSymbol(bot.config.pair)}</TableCell>
               <TableCell>
                 <StatusBadge status={bot.status} />
               </TableCell>
@@ -49,7 +50,7 @@ export function BotTable({ bots }: { bots: Bot[] }) {
                 {bot.config.lowerPrice} - {bot.config.upperPrice}
               </TableCell>
               <TableCell className="metric-mono">{bot.config.capitalAllocation} USDC</TableCell>
-              <TableCell>{bot.config.mode}</TableCell>
+              <TableCell>{bot.config.mode === "propr_live" ? "Challenge" : bot.config.mode === "paper" ? "Local Sim" : "Mock"}</TableCell>
               <TableCell>
                 <div className="flex justify-end gap-1">
                   <Link
@@ -63,7 +64,7 @@ export function BotTable({ bots }: { bots: Bot[] }) {
                     <Copy />
                   </BotAction>
                   {bot.config.mode !== "propr_live" ? (
-                    <BotAction action={createLiveCandidateAction} id={bot.id} label="Create live candidate">
+                    <BotAction action={createLiveCandidateAction} id={bot.id} label="Create challenge candidate">
                       <Rocket />
                     </BotAction>
                   ) : null}

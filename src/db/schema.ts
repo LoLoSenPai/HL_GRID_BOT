@@ -19,6 +19,7 @@ export const bots = sqliteTable(
 export const botConfigs = sqliteTable("bot_configs", {
   id: text("id").primaryKey(),
   botId: text("bot_id").notNull().references(() => bots.id, { onDelete: "cascade" }),
+  positionSide: text("position_side").notNull().default("long"),
   lowerPrice: text("lower_price").notNull(),
   upperPrice: text("upper_price").notNull(),
   gridCount: integer("grid_count").notNull(),

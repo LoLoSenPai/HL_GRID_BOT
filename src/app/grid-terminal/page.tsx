@@ -1,14 +1,16 @@
 import { RefreshCw } from "lucide-react";
 
 import { ActivityFeed } from "@/components/activity/activity-feed";
-import { TerminalChart } from "@/components/charts/terminal-chart";
+import { ReactiveTerminalChart } from "@/components/charts/reactive-terminal-chart";
 import { GridConfigPanel } from "@/components/trading/grid-config-panel";
-import { MetricCard } from "@/components/trading/metric-card";
+import { ReactiveTerminalMetrics } from "@/components/trading/reactive-terminal-metrics";
 import { StatusBadge } from "@/components/trading/status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { reconcilePaperRuntimeAction, simulateFillAction } from "@/features/bots/actions";
+import { deriveDefaultGridConfigFromPrice } from "@/domain/grid-defaults";
+import { formatMarketSymbol } from "@/domain/markets";
+import { reconcilePaperRuntimeAction, reconcileProprRuntimeAction, simulateFillAction } from "@/features/bots/actions";
 import { defaultBotConfig } from "@/features/bots/sample-data";
 import { getBotRuntimeState, getRuntimeMetrics, listBots, listEvents, listFills, listOrders } from "@/features/bots/repository";
 import { getCandlesForConfig, getMarketSnapshots } from "@/features/market-data/service";
@@ -17,15 +19,23 @@ export const dynamic = "force-dynamic";
 
 export default async function GridTerminalPage() {
   const bots = listBots();
-  const activeBot = bots.find((bot) => ["paper", "running", "out_of_range"].includes(bot.status)) ?? bots[0];
-  const config = activeBot?.config ?? defaultBotConfig;
+  const activeBot = bots.find((bot) => ["paper", "running", "live", "out_of_range"].includes(bot.status)) ?? bots[0];
+  const baseConfig = activeBot?.config ?? defaultBotConfig;
   const metrics = getRuntimeMetrics();
   const events = activeBot ? listEvents(20, activeBot.id) : [];
   const orders = activeBot ? listOrders(activeBot.id) : [];
   const fills = activeBot ? listFills(activeBot.id) : [];
   const runtimeState = activeBot ? getBotRuntimeState(activeBot.id) : null;
-  const [markets, candles] = await Promise.all([getMarketSnapshots([config.pair]), getCandlesForConfig(config)]);
-  const market = markets[0] ?? { asset: config.pair, mid: "0", funding: "0", timestamp: 0 };
+  const isChallengeBot = activeBot?.config.mode === "propr_live";
+  const markets = await getMarketSnapshots();
+  const market = markets.find((snapshot) => snapshot.asset === baseConfig.pair) ?? {
+    asset: baseConfig.pair,
+    mid: "0",
+    funding: "0",
+    timestamp: 0,
+  };
+  const config = activeBot?.config ?? deriveDefaultGridConfigFromPrice(baseConfig, market.mid);
+  const candles = await getCandlesForConfig(config);
 
   return (
     <div className="flex h-full flex-col overflow-hidden">
@@ -35,14 +45,7 @@ export default async function GridTerminalPage() {
             <h1 className="text-2xl font-semibold tracking-normal">Grid Terminal</h1>
             <StatusBadge status={activeBot?.status ?? "draft"} />
           </div>
-          <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
-            <MetricCard label="Pair" value={config.pair} />
-            <MetricCard label="Price" value={market.mid} />
-            <MetricCard label="24h" value={formatChange(market.change24hPct)} />
-            <MetricCard label="Funding" value={formatFunding(market.funding)} />
-            <MetricCard label="Equity" value={metrics.equity} />
-            <MetricCard label="PnL" value={`${Number(metrics.pnl) >= 0 ? "+" : ""}${metrics.pnl}`} />
-          </div>
+          <ReactiveTerminalMetrics initialPair={config.pair} markets={markets} metrics={metrics} />
         </div>
       </div>
 
@@ -53,7 +56,7 @@ export default async function GridTerminalPage() {
               <CardTitle className="text-sm">Candles, grid levels, fills and range limits</CardTitle>
             </CardHeader>
             <CardContent>
-              <TerminalChart config={config} candles={candles} />
+              <ReactiveTerminalChart initialConfig={config} candles={candles} />
             </CardContent>
           </Card>
           {activeBot ? (
@@ -63,17 +66,21 @@ export default async function GridTerminalPage() {
                 <span className="metric-mono text-foreground">{runtimeState?.lastPrice ?? "not reconciled"}</span>
               </div>
               <div className="flex gap-2">
-                <form action={reconcilePaperRuntimeAction}>
+                <form action={isChallengeBot ? reconcileProprRuntimeAction : reconcilePaperRuntimeAction}>
                   <input type="hidden" name="id" value={activeBot.id} />
                   <Button type="submit" variant="outline">
                     <RefreshCw />
-                    Reconcile
+                    {isChallengeBot ? "Sync Propr" : "Reconcile"}
                   </Button>
                 </form>
                 <form action={simulateFillAction}>
                   <input type="hidden" name="id" value={activeBot.id} />
-                  <Button type="submit" variant="outline" disabled={!orders.some((order) => order.status === "open")}>
-                    Simulate next paper fill
+                  <Button
+                    type="submit"
+                    variant="outline"
+                    disabled={isChallengeBot || !orders.some((order) => order.status === "open")}
+                  >
+                    Simulate next local fill
                   </Button>
                 </form>
               </div>
@@ -91,11 +98,11 @@ export default async function GridTerminalPage() {
                   <div key={order.id} className="grid grid-cols-[80px_80px_1fr_100px] gap-3 rounded-md border bg-muted/20 p-2">
                     <span className={order.side === "buy" ? "text-primary" : "text-amber-200"}>{order.side}</span>
                     <span>{order.status}</span>
-                    <span className="metric-mono">{order.quantity} {order.asset}</span>
+                    <span className="metric-mono">{order.quantity} {formatMarketSymbol(order.asset)}</span>
                     <span className="metric-mono text-right">{order.price}</span>
                   </div>
                 ))}
-                {!orders.length ? "No persisted paper orders yet. Start a paper bot from the configuration panel." : null}
+                {!orders.length ? "No persisted orders yet. Start a bot from the configuration panel." : null}
               </div>
             </TabsContent>
             <TabsContent value="fills" className="rounded-lg border p-3 text-sm text-muted-foreground">
@@ -103,12 +110,12 @@ export default async function GridTerminalPage() {
                 {fills.slice(0, 8).map((fill) => (
                   <div key={fill.id} className="grid grid-cols-[80px_1fr_100px_100px] gap-3 rounded-md border bg-muted/20 p-2">
                     <span className={fill.side === "buy" ? "text-primary" : "text-amber-200"}>{fill.side}</span>
-                    <span className="metric-mono">{fill.quantity} {fill.asset}</span>
+                    <span className="metric-mono">{fill.quantity} {formatMarketSymbol(fill.asset)}</span>
                     <span className="metric-mono text-right">{fill.price}</span>
                     <span className="metric-mono text-right">{fill.fee}</span>
                   </div>
                 ))}
-                {!fills.length ? "No persisted fills yet. Use the simulator button to fill the next paper order." : null}
+                {!fills.length ? "No persisted fills yet. Use the simulator button to fill the next local order." : null}
               </div>
             </TabsContent>
             <TabsContent value="logs" className="rounded-lg border p-3">
@@ -116,20 +123,8 @@ export default async function GridTerminalPage() {
             </TabsContent>
           </Tabs>
         </div>
-        <GridConfigPanel />
+        <GridConfigPanel marketSnapshots={markets} />
       </div>
     </div>
   );
-}
-
-function formatChange(value?: string): string {
-  if (!value) return "n/a";
-  const sign = Number(value) > 0 ? "+" : "";
-  return `${sign}${value}%`;
-}
-
-function formatFunding(value?: string): string {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return "n/a";
-  return `${(parsed * 100).toFixed(4)}%`;
 }

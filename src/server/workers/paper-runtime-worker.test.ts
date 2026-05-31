@@ -24,7 +24,7 @@ describe("paper runtime worker", () => {
     await startPaperBot(bot.id);
 
     const before = getRuntimeMetrics();
-    const summary = await runPaperRuntimeTick({ markPrices: { BTC: "100000" } });
+    const summary = await runPaperRuntimeTick({ markPrices: { BTC: "74500" } });
     const after = getRuntimeMetrics();
 
     expect(summary.reconciled).toBeGreaterThanOrEqual(1);

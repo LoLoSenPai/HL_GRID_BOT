@@ -1,13 +1,8 @@
-import type {
-  ActivityEvent,
-  Bot,
-  GridConfig,
-  MarketSnapshot,
-  RuntimeMetrics,
-} from "@/domain/types";
+import type { GridConfig, MarketSnapshot } from "@/domain/types";
 
 export const defaultBotConfig: GridConfig = {
   pair: "BTC",
+  positionSide: "long",
   lowerPrice: "73000",
   upperPrice: "76000",
   gridCount: 16,
@@ -21,64 +16,6 @@ export const defaultBotConfig: GridConfig = {
   autoPauseOutOfRange: true,
   autoRecenter: false,
   mode: "paper",
-};
-
-export const sampleBots: Bot[] = [
-  {
-    id: "bot_btc_range_v1",
-    name: "BTC Range V1",
-    status: "paper",
-    config: defaultBotConfig,
-    createdAt: "2026-05-30T12:00:00.000Z",
-    updatedAt: "2026-05-30T15:00:00.000Z",
-  },
-  {
-    id: "bot_eth_compact",
-    name: "ETH Compact Grid",
-    status: "paused",
-    config: {
-      ...defaultBotConfig,
-      pair: "ETH",
-      lowerPrice: "3300",
-      upperPrice: "3950",
-      gridCount: 14,
-      capitalAllocation: "1500",
-      orderSize: "50",
-      leverage: 2,
-    },
-    createdAt: "2026-05-29T11:00:00.000Z",
-    updatedAt: "2026-05-30T13:20:00.000Z",
-  },
-  {
-    id: "bot_sol_lab",
-    name: "SOL Lab Sweep",
-    status: "draft",
-    config: {
-      ...defaultBotConfig,
-      pair: "SOL",
-      lowerPrice: "145",
-      upperPrice: "188",
-      gridCount: 12,
-      capitalAllocation: "800",
-      orderSize: "25",
-      leverage: 1,
-      mode: "mock",
-    },
-    createdAt: "2026-05-30T09:00:00.000Z",
-    updatedAt: "2026-05-30T09:00:00.000Z",
-  },
-];
-
-export const sampleMetrics: RuntimeMetrics = {
-  equity: "10000",
-  pnl: "142.42",
-  realizedPnl: "54.11",
-  unrealizedPnl: "88.31",
-  volume: "48520",
-  exposure: "3720",
-  drawdownPct: "1.8",
-  openOrders: 22,
-  fills: 39,
 };
 
 export const sampleMarkets: MarketSnapshot[] = [
@@ -113,39 +50,5 @@ export const sampleMarkets: MarketSnapshot[] = [
     change24hPct: "0.87",
     volume24h: "140000000",
     timestamp: Date.now(),
-  },
-];
-
-export const sampleEvents: ActivityEvent[] = [
-  {
-    id: "evt_1",
-    botId: "bot_btc_range_v1",
-    type: "bot.started",
-    severity: "success",
-    message: "BTC Range V1 entered paper mode.",
-    createdAt: "2026-05-30T15:00:00.000Z",
-  },
-  {
-    id: "evt_2",
-    botId: "bot_btc_range_v1",
-    type: "order.created",
-    severity: "info",
-    message: "Placed buy limit at 98200.",
-    createdAt: "2026-05-30T15:02:00.000Z",
-  },
-  {
-    id: "evt_3",
-    botId: "bot_eth_compact",
-    type: "risk.paused",
-    severity: "warning",
-    message: "Bot paused manually before live validation.",
-    createdAt: "2026-05-30T13:20:00.000Z",
-  },
-  {
-    id: "evt_4",
-    type: "propr.auth_blocked",
-    severity: "error",
-    message: "Propr live mode blocked: API key returned 401 Unauthorized.",
-    createdAt: "2026-05-30T15:18:00.000Z",
   },
 ];

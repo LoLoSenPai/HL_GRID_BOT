@@ -1,4 +1,15 @@
-export const SUPPORTED_MARKETS = ["BTC", "ETH", "SOL", "HYPE"] as const;
+export const SUPPORTED_MARKETS = [
+  "BTC",
+  "ETH",
+  "SOL",
+  "HYPE",
+  "xyz:CRCL",
+  "xyz:TSLA",
+  "xyz:GOLD",
+  "xyz:CL",
+  "xyz:NVDA",
+  "xyz:MU",
+] as const;
 
 export type MarketSymbol = (typeof SUPPORTED_MARKETS)[number];
 
@@ -34,6 +45,7 @@ export type DecimalString = string;
 
 export interface GridConfig {
   pair: MarketSymbol;
+  positionSide: PositionSide;
   lowerPrice: DecimalString;
   upperPrice: DecimalString;
   gridCount: number;

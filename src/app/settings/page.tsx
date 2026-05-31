@@ -3,6 +3,7 @@ import { AlertTriangle, CheckCircle2, KeyRound, Server, Shield } from "lucide-re
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
+import type { ProprLeverageLimits } from "@/features/propr/client";
 import { checkProprLiveReadiness } from "@/features/propr/readiness";
 import { getEnv, redactSecret } from "@/lib/env";
 
@@ -131,11 +132,16 @@ function Policy({ label, value }: { label: string; value: string }) {
   );
 }
 
-function formatLeverageLimits(limits: { defaultMax?: number; overrides: Record<string, number> } | null): string {
+function formatLeverageLimits(limits: ProprLeverageLimits | null): string {
   if (!limits) return "unknown";
   const overrides = Object.entries(limits.overrides)
     .slice(0, 2)
     .map(([asset, max]) => `${asset} ${max}x`)
     .join(", ");
-  return overrides || (limits.defaultMax ? `default ${limits.defaultMax}x` : "available");
+  const defaults = limits.defaults
+    ? Object.entries(limits.defaults)
+        .map(([category, max]) => `${category} ${max}x`)
+        .join(", ")
+    : "";
+  return overrides || defaults || (limits.defaultMax ? `default ${limits.defaultMax}x` : "available");
 }

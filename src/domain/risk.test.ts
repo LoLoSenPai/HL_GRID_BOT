@@ -5,6 +5,7 @@ import type { GridConfig } from "@/domain/types";
 
 const config: GridConfig = {
   pair: "SOL",
+  positionSide: "long",
   lowerPrice: "140",
   upperPrice: "180",
   gridCount: 12,

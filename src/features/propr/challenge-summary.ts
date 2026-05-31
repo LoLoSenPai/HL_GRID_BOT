@@ -1,0 +1,210 @@
+import { Decimal, decimal, toDecimalString } from "@/domain/decimal";
+import {
+  computeDailyLossLimit,
+  computeDrawdownLimit,
+  computeProfitTarget,
+  PROPR_CLASSIC_1_STEP_RULES,
+  PROPR_CLASSIC_2_STEP_RULES,
+  type ProprChallengeRuleSet,
+} from "@/domain/propr-rules";
+import type { RuntimeMetrics } from "@/domain/types";
+import { createProprClient, type ProprAccount, type ProprChallengeAttempt } from "@/features/propr/client";
+import { getEnv } from "@/lib/env";
+import { logger } from "@/lib/logger";
+
+export interface ProprChallengeSummary {
+  source: "propr_live" | "local_fallback";
+  checkedAt: string;
+  activeEnv: "beta" | "live";
+  accountId?: string;
+  attemptId?: string;
+  status: "active" | "unavailable";
+  label: string;
+  ruleSet: ProprChallengeRuleSet;
+  startingBalance: string;
+  balance: string;
+  equity: string;
+  realizedPnl: string;
+  unrealizedPnl: string;
+  availableBalance?: string;
+  profitTarget: string;
+  profitProgressPct: string;
+  dailyLossLimit: string;
+  dayStartEquity: string;
+  dailyLossUsedPct: string;
+  drawdownLimit: string;
+  drawdownUsedPct: string;
+  highWaterMark: string;
+  warning?: string;
+}
+
+export async function getProprChallengeSummary(metrics: RuntimeMetrics): Promise<ProprChallengeSummary> {
+  const env = getEnv();
+
+  if (!env.PROPR_API_KEY || env.PROPR_ACTIVE_ENV !== "live") {
+    return localFallbackSummary(metrics, env.PROPR_ACTIVE_ENV, "Propr live API is not selected or configured.");
+  }
+
+  try {
+    const client = createProprClient();
+    const attempts = await client.getChallengeAttempts({ status: "active" });
+    const attempt = attempts[0];
+    if (!attempt?.accountId) {
+      return localFallbackSummary(metrics, env.PROPR_ACTIVE_ENV, "No active Propr challenge account found.");
+    }
+
+    await client.setup(attempt.accountId);
+    const [account, detailedAttempt] = await Promise.all([
+      client.getAccount(),
+      attempt.attemptId ? client.getChallengeAttempt(attempt.attemptId).catch(() => attempt) : Promise.resolve(attempt),
+    ]);
+
+    return buildSummaryFromPropr(account, detailedAttempt, env.PROPR_ACTIVE_ENV);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown Propr challenge error";
+    logger.warn("propr.challenge_summary_fallback", { error: message });
+    return localFallbackSummary(metrics, env.PROPR_ACTIVE_ENV, message);
+  }
+}
+
+function buildSummaryFromPropr(
+  account: ProprAccount,
+  attempt: ProprChallengeAttempt,
+  activeEnv: "beta" | "live",
+): ProprChallengeSummary {
+  const ruleSet = inferRuleSet(attempt);
+  const startingBalance = pickString(attempt.currentPhase?.startingBalance, attempt.phases?.[0]?.startingBalance, "5000");
+  const balance = pickString(account.balance, startingBalance);
+  const unrealizedPnl = pickString(account.totalUnrealizedPnl, "0");
+  const equity = pickString(
+    account.equity,
+    account.marginBalance,
+    decimal(balance).plus(unrealizedPnl).plus(account.isolatedPositionMargin ?? "0").toString(),
+  );
+  const highWaterMark = pickString(account.highWaterMark, Decimal.max(equity, startingBalance).toString());
+  const dayStartEquity = pickString(account.dayStartEquity, account.dailyStartEquity, account.startOfDayEquity, equity);
+  const realizedPnl = pickString(
+    attempt.totalPnl,
+    attempt.totalProfitLoss,
+    attempt.pnl,
+    decimal(balance).minus(startingBalance).toString(),
+  );
+
+  return buildSummary({
+    source: "propr_live",
+    activeEnv,
+    accountId: redactIdentifier(account.accountId ?? attempt.accountId),
+    attemptId: redactIdentifier(attempt.attemptId),
+    label: `${ruleSet.label} challenge`,
+    ruleSet,
+    startingBalance,
+    balance,
+    equity,
+    realizedPnl,
+    unrealizedPnl,
+    availableBalance: account.availableBalance,
+    dayStartEquity,
+    highWaterMark,
+  });
+}
+
+function localFallbackSummary(
+  _metrics: RuntimeMetrics,
+  activeEnv: "beta" | "live",
+  warning: string,
+): ProprChallengeSummary {
+  const startingBalance = "5000";
+  const equity = startingBalance;
+  const balance = startingBalance;
+
+  return buildSummary({
+    source: "local_fallback",
+    activeEnv,
+    label: "Classic 1-Step challenge",
+    ruleSet: PROPR_CLASSIC_1_STEP_RULES,
+    startingBalance,
+    balance,
+    equity,
+    realizedPnl: "0",
+    unrealizedPnl: "0",
+    dayStartEquity: equity,
+    highWaterMark: Decimal.max(equity, startingBalance).toString(),
+    warning,
+  });
+}
+
+function buildSummary(input: {
+  source: "propr_live" | "local_fallback";
+  activeEnv: "beta" | "live";
+  accountId?: string;
+  attemptId?: string;
+  label: string;
+  ruleSet: ProprChallengeRuleSet;
+  startingBalance: string;
+  balance: string;
+  equity: string;
+  realizedPnl: string;
+  unrealizedPnl: string;
+  availableBalance?: string;
+  dayStartEquity: string;
+  highWaterMark: string;
+  warning?: string;
+}): ProprChallengeSummary {
+  const profitTarget = computeProfitTarget(input.startingBalance, input.ruleSet);
+  const dailyLossLimit = computeDailyLossLimit(input.startingBalance, input.ruleSet);
+  const drawdownLimit = computeDrawdownLimit(input.startingBalance, input.highWaterMark, input.ruleSet);
+
+  return {
+    source: input.source,
+    checkedAt: new Date().toISOString(),
+    activeEnv: input.activeEnv,
+    accountId: input.accountId,
+    attemptId: input.attemptId,
+    status: input.source === "propr_live" ? "active" : "unavailable",
+    label: input.label,
+    ruleSet: input.ruleSet,
+    startingBalance: formatUsd(input.startingBalance),
+    balance: formatUsd(input.balance),
+    equity: formatUsd(input.equity),
+    realizedPnl: formatUsd(input.realizedPnl),
+    unrealizedPnl: formatUsd(input.unrealizedPnl),
+    availableBalance: input.availableBalance ? formatUsd(input.availableBalance) : undefined,
+    profitTarget: formatUsd(profitTarget),
+    profitProgressPct: pct(decimal(input.realizedPnl), profitTarget),
+    dailyLossLimit: formatUsd(dailyLossLimit),
+    dayStartEquity: formatUsd(input.dayStartEquity),
+    dailyLossUsedPct: pct(Decimal.max(0, decimal(input.dayStartEquity).minus(input.equity)), dailyLossLimit),
+    drawdownLimit: formatUsd(drawdownLimit),
+    drawdownUsedPct: pct(
+      Decimal.max(0, decimal(input.highWaterMark).minus(input.equity)),
+      decimal(input.highWaterMark).minus(drawdownLimit).toString(),
+    ),
+    highWaterMark: formatUsd(input.highWaterMark),
+    warning: input.warning,
+  };
+}
+
+function inferRuleSet(attempt: ProprChallengeAttempt): ProprChallengeRuleSet {
+  const phaseCount = attempt.phases?.length ?? 0;
+  return phaseCount > 1 ? PROPR_CLASSIC_2_STEP_RULES : PROPR_CLASSIC_1_STEP_RULES;
+}
+
+function pct(value: ReturnType<typeof decimal>, denominator: string): string {
+  const base = decimal(denominator);
+  if (!base.gt(0)) return "0";
+  return toDecimalString(Decimal.min(100, Decimal.max(0, value.div(base).mul(100))), 1);
+}
+
+function formatUsd(value: string): string {
+  return toDecimalString(value, 2);
+}
+
+function pickString(...values: Array<string | null | undefined>): string {
+  return values.find((value) => value !== undefined && value !== null && value !== "") ?? "0";
+}
+
+function redactIdentifier(value?: string): string | undefined {
+  if (!value) return undefined;
+  if (value.length <= 18) return value;
+  return `${value.slice(0, 12)}...${value.slice(-6)}`;
+}

@@ -20,6 +20,7 @@ export function ensureDatabase() {
     CREATE TABLE IF NOT EXISTS bot_configs (
       id TEXT PRIMARY KEY,
       bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+      position_side TEXT NOT NULL DEFAULT 'long',
       lower_price TEXT NOT NULL,
       upper_price TEXT NOT NULL,
       grid_count INTEGER NOT NULL,
@@ -135,9 +136,17 @@ export function ensureDatabase() {
     );
   `);
 
+  ensureColumn("bot_configs", "position_side", "TEXT NOT NULL DEFAULT 'long'");
+
   initialized = true;
 }
 
 export function resetDatabaseInitializationForTests() {
   initialized = false;
+}
+
+function ensureColumn(table: string, column: string, definition: string) {
+  const columns = getSqlite().prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  if (columns.some((item) => item.name === column)) return;
+  getSqlite().prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
 }
