@@ -2,17 +2,18 @@
 
 import { MetricCard } from "@/components/trading/metric-card";
 import { formatMarketSymbol } from "@/domain/markets";
-import type { MarketSnapshot, MarketSymbol, RuntimeMetrics } from "@/domain/types";
+import type { MarketSnapshot, MarketSymbol } from "@/domain/types";
+import type { ProprChallengeSummary } from "@/features/propr/challenge-summary";
 import { useTerminalStore } from "@/store/use-terminal-store";
 
 export function ReactiveTerminalMetrics({
   initialPair,
   markets,
-  metrics,
+  challenge,
 }: {
   initialPair: MarketSymbol;
   markets: MarketSnapshot[];
-  metrics: RuntimeMetrics;
+  challenge: ProprChallengeSummary;
 }) {
   const selectedPair = useTerminalStore((state) => state.config.pair) ?? initialPair;
   const market = markets.find((snapshot) => snapshot.asset === selectedPair) ?? {
@@ -21,6 +22,7 @@ export function ReactiveTerminalMetrics({
     funding: "0",
     timestamp: 0,
   };
+  const challengePnl = formatSignedNumber(Number(challenge.realizedPnl) + Number(challenge.unrealizedPnl));
 
   return (
     <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
@@ -28,8 +30,8 @@ export function ReactiveTerminalMetrics({
       <MetricCard label="Price" value={market.mid} />
       <MetricCard label="24h" value={formatChange(market.change24hPct)} />
       <MetricCard label="Funding" value={formatFunding(market.funding)} />
-      <MetricCard label="Equity" value={metrics.equity} />
-      <MetricCard label="PnL" value={`${Number(metrics.pnl) >= 0 ? "+" : ""}${metrics.pnl}`} />
+      <MetricCard label="Equity" value={challenge.equity} detail={challenge.source === "propr_live" ? "Propr" : "Fallback"} />
+      <MetricCard label="PnL" value={challengePnl} detail="Challenge" />
     </div>
   );
 }
@@ -44,4 +46,9 @@ function formatFunding(value?: string): string {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return "n/a";
   return `${(parsed * 100).toFixed(4)}%`;
+}
+
+function formatSignedNumber(value: number): string {
+  if (!Number.isFinite(value)) return "n/a";
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 }

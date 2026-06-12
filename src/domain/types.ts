@@ -56,6 +56,7 @@ export interface GridConfig {
   takeProfit?: DecimalString;
   stopLoss?: DecimalString;
   maxDrawdownPct: DecimalString;
+  challengeDailyLossStopPct: DecimalString;
   autoPauseOutOfRange: boolean;
   autoRecenter: boolean;
   mode: TradingMode;

@@ -14,6 +14,7 @@ import { reconcilePaperRuntimeAction, reconcileProprRuntimeAction, simulateFillA
 import { defaultBotConfig } from "@/features/bots/sample-data";
 import { getBotRuntimeState, getRuntimeMetrics, listBots, listEvents, listFills, listOrders } from "@/features/bots/repository";
 import { getCandlesForConfig, getMarketSnapshots } from "@/features/market-data/service";
+import { getProprChallengeSummary } from "@/features/propr/challenge-summary";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +28,7 @@ export default async function GridTerminalPage() {
   const fills = activeBot ? listFills(activeBot.id) : [];
   const runtimeState = activeBot ? getBotRuntimeState(activeBot.id) : null;
   const isChallengeBot = activeBot?.config.mode === "propr_live";
-  const markets = await getMarketSnapshots();
+  const [markets, challenge] = await Promise.all([getMarketSnapshots(), getProprChallengeSummary(metrics)]);
   const market = markets.find((snapshot) => snapshot.asset === baseConfig.pair) ?? {
     asset: baseConfig.pair,
     mid: "0",
@@ -45,7 +46,7 @@ export default async function GridTerminalPage() {
             <h1 className="text-2xl font-semibold tracking-normal">Grid Terminal</h1>
             <StatusBadge status={activeBot?.status ?? "draft"} />
           </div>
-          <ReactiveTerminalMetrics initialPair={config.pair} markets={markets} metrics={metrics} />
+          <ReactiveTerminalMetrics initialPair={config.pair} markets={markets} challenge={challenge} />
         </div>
       </div>
 

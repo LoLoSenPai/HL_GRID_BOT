@@ -122,6 +122,8 @@ export class ProprClient {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly selectedAccountId?: string;
+  private readonly selectedAccountIdName: string;
   accountId: string | null = null;
 
   constructor(options: ProprClientOptions = {}) {
@@ -129,6 +131,8 @@ export class ProprClient {
     this.apiKey = options.apiKey ?? env.PROPR_API_KEY ?? "";
     this.baseUrl = options.baseUrl ?? env.PROPR_API_URL;
     this.timeoutMs = options.timeoutMs ?? 30_000;
+    this.selectedAccountId = env.PROPR_SELECTED_ACCOUNT_ID;
+    this.selectedAccountIdName = env.PROPR_SELECTED_ACCOUNT_ID_NAME;
 
     if (!this.apiKey) {
       throw new Error(`${env.PROPR_SELECTED_API_KEY_NAME} is required for Propr live mode.`);
@@ -136,15 +140,26 @@ export class ProprClient {
   }
 
   async setup(accountId?: string): Promise<string> {
-    if (accountId) {
-      this.accountId = accountId;
-      return accountId;
+    const attempts = await this.getChallengeAttempts({ status: "active" });
+    const selectedAccountId = accountId ?? this.selectedAccountId;
+
+    if (selectedAccountId) {
+      const selectedAttempt = attempts.find((attempt) => attempt.accountId === selectedAccountId);
+      if (!selectedAttempt) {
+        throw new Error(`${this.selectedAccountIdName} does not match an active Propr challenge account.`);
+      }
+      this.accountId = selectedAccountId;
+      return selectedAccountId;
     }
 
-    const attempts = await this.getChallengeAttempts({ status: "active" });
     const attempt = attempts[0];
     if (!attempt?.accountId) {
       throw new Error("No active Propr challenge account found.");
+    }
+    if (attempts.length > 1) {
+      throw new Error(
+        `Multiple active Propr challenge accounts found (${attempts.length}). Set ${this.selectedAccountIdName} before live execution.`,
+      );
     }
     this.accountId = attempt.accountId;
     return attempt.accountId;

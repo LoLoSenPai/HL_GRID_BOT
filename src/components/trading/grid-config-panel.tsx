@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, Minus, Play, Plus, Rocket, Square, TrendingDown, TrendingUp, Zap } from "lucide-react";
+import { AlertTriangle, Minus, Play, Plus, Rocket, ShieldCheck, Square, TrendingDown, TrendingUp, Zap } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -49,6 +49,24 @@ const MODE_DETAILS: Record<TradingMode, { label: string; detail: string }> = {
     detail: "Live API, active challenge account. Places initial entry grid orders.",
   },
 };
+
+interface ChallengeRiskPreflight {
+  status: "pass" | "blocked" | "invalid";
+  candidateWorstCase: string;
+  candidateLossToStop: string;
+  candidateStopBuffer: string;
+  candidateAutoOrderSize: string;
+  candidateEntryOrderCount: number;
+  committedWorstCase: string;
+  dailyRemaining: string;
+  dailyStopPct: string;
+  dailyStopAmount: string;
+  drawdownRemaining: string;
+  remainingBudget: string;
+  recommendedCapitalAllocation: string;
+  recommendedBudgetUsePct: string;
+  blockers: string[];
+}
 
 function clampLeverage(value: number, max: number) {
   return Math.min(Math.max(Math.round(value), 1), max);
@@ -170,10 +188,12 @@ function GridPreviewSummary({ preview }: { preview: GridPreview }) {
   return (
     <div className="grid grid-cols-2 gap-2 rounded-lg border bg-muted/20 p-3">
       <PreviewMetric label="Grid lines" value={String(preview.lineCount)} />
+      <PreviewMetric label="Entry orders" value={String(preview.entryOrderCount)} />
+      <PreviewMetric label="Auto order size" value={`$${preview.autoOrderSize}`} />
       <PreviewMetric label="Total notional" value={`$${preview.totalNotional}`} />
       <PreviewMetric label="Effective spacing" value={`${preview.spacingPct}%`} />
       <PreviewMetric label="Profit / cycle" value={`$${preview.profitPerCycle}`} />
-      <PreviewMetric label="Worst-case loss" value={`$${preview.worstCaseLoss}`} tone="destructive" />
+      <PreviewMetric label="Loss to SL + buffer" value={`$${preview.worstCaseLoss}`} tone="destructive" />
       <PreviewMetric
         label="Spacing status"
         value={preview.spacingStatus === "ok" ? "OK" : "Tight"}
@@ -183,6 +203,83 @@ function GridPreviewSummary({ preview }: { preview: GridPreview }) {
         <div className="text-xs text-muted-foreground">Ratio R:R</div>
         <div className="metric-mono text-sm font-semibold">{preview.riskRewardRatio}</div>
       </div>
+    </div>
+  );
+}
+
+function ChallengeRiskPreflightPanel({
+  preflight,
+  currentCapitalAllocation,
+  onApplySafeCapital,
+}: {
+  preflight: ChallengeRiskPreflight | null;
+  currentCapitalAllocation: string;
+  onApplySafeCapital: () => void;
+}) {
+  const canApplySafeCapital =
+    preflight &&
+    Number(preflight.recommendedCapitalAllocation) > 0 &&
+    preflight.recommendedCapitalAllocation !== currentCapitalAllocation;
+
+  return (
+    <div className="rounded-lg border bg-muted/20 p-3">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm font-medium">
+          <ShieldCheck className="size-4 text-primary" />
+          Challenge risk preflight
+        </div>
+        <div
+          className={cn(
+            "rounded-md border px-2 py-1 text-xs font-medium",
+            !preflight && "border-muted-foreground/30 text-muted-foreground",
+            preflight?.status === "pass" && "border-primary/30 bg-primary/10 text-primary",
+            preflight?.status !== "pass" && preflight && "border-destructive/30 bg-destructive/10 text-destructive",
+          )}
+        >
+          {preflight ? (preflight.status === "pass" ? "PASS" : "BLOCKED") : "SYNCING"}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <PreviewMetric label="SL risk + buffer" value={`$${preflight?.candidateWorstCase ?? "..."}`} tone="destructive" />
+        <PreviewMetric label="Risk left" value={`$${preflight?.remainingBudget ?? "..."}`} tone="primary" />
+        <PreviewMetric label="Daily left" value={`$${preflight?.dailyRemaining ?? "..."}`} />
+        <PreviewMetric label="Drawdown left" value={`$${preflight?.drawdownRemaining ?? "..."}`} />
+        <PreviewMetric label="Auto order size" value={`$${preflight?.candidateAutoOrderSize ?? "..."}`} />
+        <PreviewMetric label="Entry orders" value={preflight ? String(preflight.candidateEntryOrderCount) : "..."} />
+      </div>
+
+      <div className="mt-3 rounded-md border bg-background/50 p-2 text-xs text-muted-foreground">
+        <div>
+          Open bot risk already committed:{" "}
+          <span className="metric-mono text-foreground">${preflight?.committedWorstCase ?? "..."}</span>
+        </div>
+        <div className="mt-1">
+          Daily safety stop:{" "}
+          <span className="metric-mono text-foreground">
+            {preflight?.dailyStopPct ?? "..."}% / ${preflight?.dailyStopAmount ?? "..."}
+          </span>
+        </div>
+        <div className="mt-1">
+          Raw SL loss + buffer:{" "}
+          <span className="metric-mono text-foreground">
+            ${preflight?.candidateLossToStop ?? "..."} + ${preflight?.candidateStopBuffer ?? "..."}
+          </span>
+        </div>
+        {preflight?.blockers[0] ? <div className="mt-1 text-destructive">{preflight.blockers[0]}</div> : null}
+      </div>
+
+      {preflight?.status !== "pass" && canApplySafeCapital ? (
+        <Button type="button" variant="outline" className="mt-3 w-full" onClick={onApplySafeCapital}>
+          Apply safe capital: {preflight.recommendedCapitalAllocation} USDC
+        </Button>
+      ) : null}
+
+      {preflight?.status !== "pass" && canApplySafeCapital ? (
+        <div className="mt-2 text-xs text-muted-foreground">
+          Uses {preflight.recommendedBudgetUsePct}% of the remaining challenge risk budget.
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -333,6 +430,7 @@ export function GridConfigPanel({ marketSnapshots = [] }: { marketSnapshots?: Ma
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [actionError, setActionError] = useState<string | null>(null);
+  const [challengePreflight, setChallengePreflight] = useState<ChallengeRiskPreflight | null>(null);
   const marketDefaultsAppliedRef = useRef(false);
   const config = useTerminalStore((state) => state.config);
   const mode = useTerminalStore((state) => state.mode);
@@ -351,15 +449,46 @@ export function GridConfigPanel({ marketSnapshots = [] }: { marketSnapshots?: Ma
     [config.pair, marketSnapshots],
   );
   const preview = estimateGridPreview(config);
+  const livePreflightIssue =
+    mode === "propr_live" && challengePreflight?.status !== "pass"
+      ? challengePreflight?.blockers[0] ?? "Challenge risk preflight is still syncing."
+      : null;
 
   const patch = (patchValue: Partial<GridConfig>) => updateConfig(patchValue);
-  const canSubmit = !blockingIssues.length && !liveNeedsAcknowledgement && !pending;
+  const canSubmit = !blockingIssues.length && !liveNeedsAcknowledgement && !livePreflightIssue && !pending;
 
   useEffect(() => {
     if (marketDefaultsAppliedRef.current || !currentMarket?.mid) return;
     marketDefaultsAppliedRef.current = true;
     updateConfig(deriveDefaultGridConfigFromPrice(config, currentMarket.mid));
   }, [config, currentMarket?.mid, updateConfig]);
+
+  useEffect(() => {
+    if (mode !== "propr_live") return;
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      try {
+        setChallengePreflight(null);
+        const response = await fetch("/api/bots/preflight", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ config }),
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const payload = (await response.json()) as { data?: ChallengeRiskPreflight };
+        if (!controller.signal.aborted) setChallengePreflight(payload.data ?? null);
+      } catch {
+        if (!controller.signal.aborted) setChallengePreflight(null);
+      }
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [config, mode]);
 
   const selectMarket = (market: MarketSymbol) => {
     setSelectedMarket(market);
@@ -380,6 +509,10 @@ export function GridConfigPanel({ marketSnapshots = [] }: { marketSnapshots?: Ma
     updateConfig(deriveGridConfigForPositionSide(config, positionSide));
   };
   const setLeverage = (value: number) => patch({ leverage: clampLeverage(value, maxLeverage) });
+  const applySafeCapital = () => {
+    if (!challengePreflight?.recommendedCapitalAllocation) return;
+    patch({ capitalAllocation: challengePreflight.recommendedCapitalAllocation });
+  };
 
   const submitBotConfig = () => {
     setActionError(null);
@@ -477,8 +610,11 @@ export function GridConfigPanel({ marketSnapshots = [] }: { marketSnapshots?: Ma
               onChange={(event) => patch({ gridCount: Number(event.target.value) })}
             />
           </Field>
-          <Field label="Order size">
-            <Input value={config.orderSize} onChange={(event) => patch({ orderSize: event.target.value })} />
+          <Field label="Daily stop %">
+            <Input
+              value={config.challengeDailyLossStopPct}
+              onChange={(event) => patch({ challengeDailyLossStopPct: event.target.value })}
+            />
           </Field>
           <Field label="Capital">
             <Input
@@ -530,6 +666,13 @@ export function GridConfigPanel({ marketSnapshots = [] }: { marketSnapshots?: Ma
           <div className="flex flex-col gap-2">
             <GridRangeVisual config={config} markPrice={currentMarket?.mid} />
             <GridPreviewSummary preview={preview} />
+            {mode === "propr_live" ? (
+              <ChallengeRiskPreflightPanel
+                preflight={challengePreflight}
+                currentCapitalAllocation={config.capitalAllocation}
+                onApplySafeCapital={applySafeCapital}
+              />
+            ) : null}
           </div>
         </Field>
 
@@ -551,15 +694,15 @@ export function GridConfigPanel({ marketSnapshots = [] }: { marketSnapshots?: Ma
               {actionError ??
               (liveNeedsAcknowledgement
                 ? "Bot deployment requires explicit confirmation."
-                : blockingIssues[0]?.message)}
+                : livePreflightIssue ?? blockingIssues[0]?.message)}
             </AlertDescription>
           </Alert>
         ) : null}
 
-        {liveCandidateMode && !liveNeedsAcknowledgement && !blockingIssues.length && !actionError ? (
+        {liveCandidateMode && !liveNeedsAcknowledgement && !blockingIssues.length && !livePreflightIssue && !actionError ? (
           <Alert>
             <Rocket className="size-4" />
-            <AlertTitle>Candidate only</AlertTitle>
+            <AlertTitle>Ready to deploy</AlertTitle>
             <AlertDescription>
               This deploys the bot on the active Propr challenge. Entry orders are placed first; Sync Propr adds
               reduce-only exit orders after fills.

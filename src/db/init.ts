@@ -31,6 +31,7 @@ export function ensureDatabase() {
       take_profit TEXT,
       stop_loss TEXT,
       max_drawdown_pct TEXT NOT NULL,
+      challenge_daily_loss_stop_pct TEXT NOT NULL DEFAULT '2.75',
       auto_pause_out_of_range INTEGER NOT NULL,
       auto_recenter INTEGER NOT NULL,
       created_at TEXT NOT NULL
@@ -137,6 +138,7 @@ export function ensureDatabase() {
   `);
 
   ensureColumn("bot_configs", "position_side", "TEXT NOT NULL DEFAULT 'long'");
+  ensureColumn("bot_configs", "challenge_daily_loss_stop_pct", "TEXT NOT NULL DEFAULT '2.75'");
 
   initialized = true;
 }

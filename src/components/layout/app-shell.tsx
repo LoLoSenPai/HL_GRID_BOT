@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
   Bot,
@@ -30,8 +31,46 @@ const navItems = [
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
+  const [killPending, setKillPending] = useState(false);
+  const [killError, setKillError] = useState(false);
   const killSwitchActive = useTerminalStore((state) => state.killSwitchActive);
   const setKillSwitch = useTerminalStore((state) => state.setKillSwitch);
+  const killSwitchLabel = killPending
+    ? "Stopping..."
+    : killError
+      ? "Kill failed"
+      : killSwitchActive
+        ? "Emergency sent"
+        : "Kill switch";
+
+  const activateKillSwitch = async () => {
+    if (killPending) return;
+    const confirmed = window.confirm(
+      "Emergency stop: cancel all Propr orders and close open positions on the active challenge account?",
+    );
+    if (!confirmed) return;
+
+    setKillPending(true);
+    setKillError(false);
+    try {
+      const response = await fetch("/api/bots/kill-switch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "Manual kill switch from app shell" }),
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? "Propr emergency stop failed.");
+      }
+      setKillSwitch(true);
+      router.refresh();
+    } catch {
+      setKillError(true);
+    } finally {
+      setKillPending(false);
+    }
+  };
 
   return (
     <div className="flex min-h-screen bg-background text-foreground">
@@ -68,12 +107,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </nav>
         <div className="border-t p-3">
           <Button
-            variant={killSwitchActive ? "destructive" : "outline"}
+            variant={killSwitchActive || killError ? "destructive" : "outline"}
             className="h-9 w-full justify-start gap-2"
-            onClick={() => setKillSwitch(!killSwitchActive)}
+            disabled={killPending}
+            onClick={activateKillSwitch}
           >
             <ShieldAlert data-icon="inline-start" />
-            {killSwitchActive ? "Kill switch active" : "Kill switch"}
+            {killSwitchLabel}
           </Button>
         </div>
       </aside>
@@ -85,11 +125,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
           <Button
             size="sm"
-            variant={killSwitchActive ? "destructive" : "outline"}
-            onClick={() => setKillSwitch(!killSwitchActive)}
+            variant={killSwitchActive || killError ? "destructive" : "outline"}
+            disabled={killPending}
+            onClick={activateKillSwitch}
           >
             <ShieldAlert data-icon="inline-start" />
-            Risk
+            {killPending ? "Stopping" : killError ? "Failed" : "Risk"}
           </Button>
         </header>
         <main className="min-w-0 flex-1 overflow-hidden">{children}</main>

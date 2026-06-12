@@ -23,18 +23,19 @@ interface ChartCandle {
 }
 
 function buildCandles(reference: number): ChartCandle[] {
+  const safeReference = Number.isFinite(reference) && reference > 0 ? reference : 1;
   const now = Math.floor(Date.now() / 1000);
   return Array.from({ length: 80 }, (_, index) => {
     const time = (now - (80 - index) * 900) as UTCTimestamp;
-    const wave = Math.sin(index / 6) * reference * 0.012;
-    const drift = (index - 40) * reference * 0.00018;
-    const open = reference + wave + drift;
-    const close = open + Math.cos(index / 5) * reference * 0.004;
+    const wave = Math.sin(index / 6) * safeReference * 0.012;
+    const drift = (index - 40) * safeReference * 0.00018;
+    const open = safeReference + wave + drift;
+    const close = open + Math.cos(index / 5) * safeReference * 0.004;
     return {
       time,
       open,
-      high: Math.max(open, close) + reference * 0.006,
-      low: Math.min(open, close) - reference * 0.006,
+      high: Math.max(open, close) + safeReference * 0.006,
+      low: Math.min(open, close) - safeReference * 0.006,
       close,
     };
   });
@@ -61,9 +62,9 @@ function normalizeCandles(candles: Candle[] | undefined, reference: number): Cha
 export function TerminalChart({ config, candles: inputCandles }: { config: GridConfig; candles?: Candle[] }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const reference = Number(config.lowerPrice) + (Number(config.upperPrice) - Number(config.lowerPrice)) / 2;
+  const reference = resolveReference(config, inputCandles);
   const candles = useMemo(() => normalizeCandles(inputCandles, reference), [inputCandles, reference]);
-  const levels = useMemo(() => generateGridLevels(config, String(reference)), [config, reference]);
+  const levels = useMemo(() => safeGenerateGridLevels(config, reference), [config, reference]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -136,4 +137,27 @@ export function TerminalChart({ config, candles: inputCandles }: { config: GridC
   }, [candles, levels]);
 
   return <div ref={containerRef} className="h-[440px] min-h-[320px] w-full" />;
+}
+
+function resolveReference(config: GridConfig, inputCandles?: Candle[]): number {
+  const lower = Number(config.lowerPrice);
+  const upper = Number(config.upperPrice);
+  if (Number.isFinite(lower) && Number.isFinite(upper) && upper > lower) {
+    return lower + (upper - lower) / 2;
+  }
+
+  const lastClose = Number(inputCandles?.at(-1)?.close);
+  if (Number.isFinite(lastClose) && lastClose > 0) return lastClose;
+
+  return 1;
+}
+
+function safeGenerateGridLevels(config: GridConfig, reference: number) {
+  if (!Number.isFinite(reference) || reference <= 0) return [];
+
+  try {
+    return generateGridLevels(config, String(reference)).filter((level) => Number.isFinite(Number(level.price)));
+  } catch {
+    return [];
+  }
 }

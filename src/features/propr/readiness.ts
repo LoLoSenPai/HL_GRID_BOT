@@ -15,6 +15,8 @@ export interface ProprLiveReadiness {
   authenticated: boolean;
   activeChallengeCount: number;
   activeAccountId?: string;
+  selectedAccountId?: string;
+  selectedAccountIdName: "PROPR_BETA_ACCOUNT_ID" | "PROPR_LIVE_ACCOUNT_ID" | "PROPR_ACCOUNT_ID";
   leverageLimits: ProprLeverageLimits | null;
   liveEnabled: boolean;
   blockers: string[];
@@ -36,6 +38,8 @@ export async function checkProprLiveReadiness(): Promise<ProprLiveReadiness> {
     },
     authenticated: false,
     activeChallengeCount: 0,
+    selectedAccountId: env.PROPR_SELECTED_ACCOUNT_ID ? redactIdentifier(env.PROPR_SELECTED_ACCOUNT_ID) : undefined,
+    selectedAccountIdName: env.PROPR_SELECTED_ACCOUNT_ID_NAME,
     leverageLimits: null,
     liveEnabled: false,
     blockers: [],
@@ -80,9 +84,21 @@ export async function checkProprLiveReadiness(): Promise<ProprLiveReadiness> {
   try {
     const attempts = await client.getChallengeAttempts({ status: "active" });
     readiness.activeChallengeCount = attempts.length;
-    readiness.activeAccountId = attempts[0]?.accountId ? redactIdentifier(attempts[0].accountId) : undefined;
+    const selectedAttempt = env.PROPR_SELECTED_ACCOUNT_ID
+      ? attempts.find((attempt) => attempt.accountId === env.PROPR_SELECTED_ACCOUNT_ID)
+      : undefined;
+    const activeAttempt = selectedAttempt ?? attempts[0];
+    readiness.activeAccountId = activeAttempt?.accountId ? redactIdentifier(activeAttempt.accountId) : undefined;
     if (attempts.length === 0) {
       readiness.blockers.push("No active Propr challenge account found.");
+    }
+    if (env.PROPR_SELECTED_ACCOUNT_ID && !selectedAttempt) {
+      readiness.blockers.push(`${env.PROPR_SELECTED_ACCOUNT_ID_NAME} does not match an active Propr challenge account.`);
+    }
+    if (!env.PROPR_SELECTED_ACCOUNT_ID && attempts.length > 1) {
+      readiness.blockers.push(
+        `Multiple active Propr challenge accounts found (${attempts.length}). Set ${env.PROPR_SELECTED_ACCOUNT_ID_NAME} before live execution.`,
+      );
     }
   } catch (error) {
     readiness.blockers.push(`Could not load active challenge attempts: ${errorMessage(error)}`);

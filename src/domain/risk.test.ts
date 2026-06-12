@@ -14,6 +14,7 @@ const config: GridConfig = {
   spacing: "arithmetic",
   orderSize: "25",
   maxDrawdownPct: "8",
+  challengeDailyLossStopPct: "2.75",
   autoPauseOutOfRange: true,
   autoRecenter: false,
   mode: "paper",

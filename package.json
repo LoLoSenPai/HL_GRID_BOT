@@ -10,6 +10,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "worker:paper": "tsx src/server/workers/paper-loop.ts",
+    "worker:propr": "tsx src/server/workers/propr-reconciliation-worker.ts",
     "typecheck": "tsc --noEmit",
     "db:generate": "drizzle-kit generate",
     "db:push": "drizzle-kit push"

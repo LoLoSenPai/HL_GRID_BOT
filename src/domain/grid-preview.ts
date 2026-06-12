@@ -1,35 +1,74 @@
 import { decimal, toDecimalString } from "@/domain/decimal";
+import { estimateGridRisk } from "@/domain/grid-risk";
 import type { GridConfig } from "@/domain/types";
 
 export interface GridPreview {
   lineCount: number;
+  entryOrderCount: number;
+  autoOrderSize: string;
   totalNotional: string;
   spacingPct: string;
   profitPerCycle: string;
   worstCaseLoss: string;
+  lossToStop: string;
+  stopBuffer: string;
   riskRewardRatio: string;
   spacingStatus: "ok" | "tight";
 }
 
-export function estimateGridPreview(config: GridConfig): GridPreview {
-  const midpoint = decimal(config.lowerPrice).plus(config.upperPrice).div(2);
-  const totalNotional = decimal(config.capitalAllocation).mul(config.leverage);
-  const spacingPct = estimateEffectiveSpacingPct(config, midpoint);
-  const notionalPerGrid = totalNotional.div(config.gridCount);
-  const profitPerCycle = notionalPerGrid.mul(spacingPct).div(100);
-  const worstCaseLoss = estimateWorstCaseLoss(config, midpoint, totalNotional);
-  const reward = estimateTakeProfitReward(config, midpoint, totalNotional);
-  const riskRewardRatio = worstCaseLoss.gt(0) ? reward.div(worstCaseLoss) : decimal(0);
+const EMPTY_PREVIEW: GridPreview = {
+  lineCount: 0,
+  entryOrderCount: 0,
+  autoOrderSize: "0",
+  totalNotional: "0",
+  spacingPct: "0",
+  profitPerCycle: "0",
+  worstCaseLoss: "0",
+  lossToStop: "0",
+  stopBuffer: "0",
+  riskRewardRatio: "0x",
+  spacingStatus: "tight",
+};
 
-  return {
-    lineCount: config.gridCount,
-    totalNotional: toDecimalString(totalNotional, 2),
-    spacingPct: toDecimalString(spacingPct, 3),
-    profitPerCycle: toDecimalString(profitPerCycle, 2),
-    worstCaseLoss: toDecimalString(worstCaseLoss, 2),
-    riskRewardRatio: `${toDecimalString(riskRewardRatio, 2)}x`,
-    spacingStatus: spacingPct.gte("0.05") ? "ok" : "tight",
-  };
+export function estimateGridPreview(config: GridConfig): GridPreview {
+  try {
+    const lowerPrice = decimal(config.lowerPrice);
+    const upperPrice = decimal(config.upperPrice);
+    const gridCount = Number(config.gridCount);
+    const totalNotional = decimal(config.capitalAllocation).mul(config.leverage);
+
+    if (!lowerPrice.gt(0) || !upperPrice.gt(lowerPrice) || gridCount < 2 || !totalNotional.gt(0)) {
+      return { ...EMPTY_PREVIEW, lineCount: Number.isFinite(gridCount) ? Math.max(0, gridCount) : 0 };
+    }
+
+    const midpoint = lowerPrice.plus(upperPrice).div(2);
+    const spacingPct = estimateEffectiveSpacingPct(config, midpoint);
+    const risk = estimateGridRisk(config, toDecimalString(midpoint, 8));
+    const notionalPerGrid = decimal(risk.autoOrderSize);
+    const profitPerCycle = notionalPerGrid.mul(spacingPct).div(100);
+    const worstCaseLoss = decimal(risk.bufferedLossToStop);
+    const reward = decimal(risk.rewardToTakeProfit);
+    const riskRewardRatio = worstCaseLoss.gt(0) ? reward.div(worstCaseLoss) : decimal(0);
+
+    return {
+      lineCount: gridCount,
+      entryOrderCount: risk.entryOrderCount,
+      autoOrderSize: risk.autoOrderSize,
+      totalNotional: toDecimalString(totalNotional, 2),
+      spacingPct: toDecimalString(spacingPct, 3),
+      profitPerCycle: toDecimalString(profitPerCycle, 2),
+      worstCaseLoss: toDecimalString(worstCaseLoss, 2),
+      lossToStop: risk.lossToStop,
+      stopBuffer: risk.stopBuffer,
+      riskRewardRatio: `${toDecimalString(riskRewardRatio, 2)}x`,
+      spacingStatus: spacingPct.gte("0.05") ? "ok" : "tight",
+    };
+  } catch {
+    return {
+      ...EMPTY_PREVIEW,
+      lineCount: Number.isFinite(config.gridCount) ? Math.max(0, config.gridCount) : 0,
+    };
+  }
 }
 
 function estimateEffectiveSpacingPct(config: GridConfig, midpoint: ReturnType<typeof decimal>) {
@@ -42,28 +81,4 @@ function estimateEffectiveSpacingPct(config: GridConfig, midpoint: ReturnType<ty
 
   const step = decimal(config.upperPrice).minus(config.lowerPrice).div(config.gridCount - 1);
   return step.div(midpoint).mul(100);
-}
-
-function estimateWorstCaseLoss(
-  config: GridConfig,
-  midpoint: ReturnType<typeof decimal>,
-  totalNotional: ReturnType<typeof decimal>,
-) {
-  if (!config.stopLoss || midpoint.lte(0)) return decimal(0);
-  const stopLoss = decimal(config.stopLoss);
-  const lossPct =
-    config.positionSide === "long" ? midpoint.minus(stopLoss).div(midpoint) : stopLoss.minus(midpoint).div(midpoint);
-  return lossPct.gt(0) ? totalNotional.mul(lossPct) : decimal(0);
-}
-
-function estimateTakeProfitReward(
-  config: GridConfig,
-  midpoint: ReturnType<typeof decimal>,
-  totalNotional: ReturnType<typeof decimal>,
-) {
-  if (!config.takeProfit || midpoint.lte(0)) return decimal(0);
-  const takeProfit = decimal(config.takeProfit);
-  const rewardPct =
-    config.positionSide === "long" ? takeProfit.minus(midpoint).div(midpoint) : midpoint.minus(takeProfit).div(midpoint);
-  return rewardPct.gt(0) ? totalNotional.mul(rewardPct) : decimal(0);
 }

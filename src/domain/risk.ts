@@ -90,11 +90,14 @@ export function validateBotConfig(
     });
   }
 
-  if (!isPositiveDecimal(config.orderSize) || decimal(config.orderSize).lt(limits.minOrderUsd)) {
+  const conservativeAutoOrderSize = isPositiveDecimal(config.capitalAllocation)
+    ? decimal(config.capitalAllocation).mul(config.leverage).div(Math.max(1, config.gridCount))
+    : decimal(0);
+  if (conservativeAutoOrderSize.lt(limits.minOrderUsd)) {
     issues.push({
-      code: "min_order_size",
+      code: "min_auto_order_size",
       severity: "error",
-      message: `Order size must be at least ${limits.minOrderUsd} USDC.`,
+      message: `Auto order size must be at least ${limits.minOrderUsd} USDC.`,
     });
   }
 
@@ -111,6 +114,18 @@ export function validateBotConfig(
       code: "drawdown_limit",
       severity: "error",
       message: "Max drawdown must be positive and no greater than 50%.",
+    });
+  }
+
+  if (
+    !isPositiveDecimal(config.challengeDailyLossStopPct) ||
+    decimal(config.challengeDailyLossStopPct).lte(0) ||
+    decimal(config.challengeDailyLossStopPct).gte(3)
+  ) {
+    issues.push({
+      code: "challenge_daily_stop",
+      severity: "error",
+      message: "Challenge daily stop must be greater than 0% and below the Propr 3% daily loss limit.",
     });
   }
 

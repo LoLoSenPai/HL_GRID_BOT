@@ -43,16 +43,28 @@ export function reduceOnlyForGridSide(positionSide: PositionSide, orderSide: Ord
   return positionSide === "long" ? orderSide === "sell" : orderSide === "buy";
 }
 
+export function autoOrderSizeUsd(config: GridConfig, referencePrice: string): string {
+  const prices = generateGridPrices(config);
+  const entryCount = prices.filter((price) => {
+    const side = sideForLevel(price, referencePrice);
+    return !reduceOnlyForGridSide(config.positionSide, side);
+  }).length;
+  if (entryCount === 0) return "0";
+
+  return toDecimalString(decimal(config.capitalAllocation).mul(config.leverage).div(entryCount), 2);
+}
+
 export function generateGridLevels(
   config: GridConfig,
   referencePrice: string,
 ): GridLevel[] {
+  const orderSize = autoOrderSizeUsd(config, referencePrice);
   return generateGridPrices(config).map((price, index) => ({
     id: `${config.pair}-${index}-${price}`,
     index,
     price,
     side: sideForLevel(price, referencePrice),
-    quantity: calculateOrderQuantity(config.pair, config.orderSize, price),
+    quantity: calculateOrderQuantity(config.pair, orderSize, price),
   }));
 }
 

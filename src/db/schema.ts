@@ -30,6 +30,7 @@ export const botConfigs = sqliteTable("bot_configs", {
   takeProfit: text("take_profit"),
   stopLoss: text("stop_loss"),
   maxDrawdownPct: text("max_drawdown_pct").notNull(),
+  challengeDailyLossStopPct: text("challenge_daily_loss_stop_pct").notNull().default("2.75"),
   autoPauseOutOfRange: integer("auto_pause_out_of_range", { mode: "boolean" }).notNull(),
   autoRecenter: integer("auto_recenter", { mode: "boolean" }).notNull(),
   createdAt: text("created_at").notNull(),

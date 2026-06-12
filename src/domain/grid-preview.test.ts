@@ -4,7 +4,7 @@ import { estimateGridPreview } from "@/domain/grid-preview";
 import { defaultBotConfig } from "@/features/bots/sample-data";
 
 describe("grid preview", () => {
-  it("matches the long worst-case estimate from range midpoint to stop loss", () => {
+  it("matches the auto-sized long risk estimate to stop loss", () => {
     const preview = estimateGridPreview({
       ...defaultBotConfig,
       positionSide: "long",
@@ -18,10 +18,14 @@ describe("grid preview", () => {
     });
 
     expect(preview.lineCount).toBe(81);
+    expect(preview.entryOrderCount).toBe(41);
+    expect(preview.autoOrderSize).toBe("60.98");
     expect(preview.totalNotional).toBe("2500");
     expect(preview.spacingPct).toBe("0.244");
-    expect(preview.profitPerCycle).toBe("0.08");
-    expect(preview.worstCaseLoss).toBe("263.16");
-    expect(preview.riskRewardRatio).toBe("0.93x");
+    expect(preview.profitPerCycle).toBe("0.15");
+    expect(preview.worstCaseLoss).toBe("160.66");
+    expect(preview.lossToStop).toBe("146.05");
+    expect(preview.stopBuffer).toBe("14.61");
+    expect(preview.riskRewardRatio).toBe("2.42x");
   });
 });

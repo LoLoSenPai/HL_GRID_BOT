@@ -48,12 +48,12 @@ export async function getProprChallengeSummary(metrics: RuntimeMetrics): Promise
   try {
     const client = createProprClient();
     const attempts = await client.getChallengeAttempts({ status: "active" });
-    const attempt = attempts[0];
-    if (!attempt?.accountId) {
+    if (!attempts[0]?.accountId) {
       return localFallbackSummary(metrics, env.PROPR_ACTIVE_ENV, "No active Propr challenge account found.");
     }
 
-    await client.setup(attempt.accountId);
+    const accountId = await client.setup();
+    const attempt = attempts.find((activeAttempt) => activeAttempt.accountId === accountId) ?? attempts[0];
     const [account, detailedAttempt] = await Promise.all([
       client.getAccount(),
       attempt.attemptId ? client.getChallengeAttempt(attempt.attemptId).catch(() => attempt) : Promise.resolve(attempt),

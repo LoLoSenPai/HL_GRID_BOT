@@ -2,7 +2,6 @@ import { ulid } from "ulid";
 
 import { decimal, toDecimalString } from "@/domain/decimal";
 import { generateGridLevels, isOutOfRange, reduceOnlyForGridSide } from "@/domain/grid";
-import { estimateGridPreview } from "@/domain/grid-preview";
 import { formatMarketSymbol } from "@/domain/markets";
 import type {
   ActivityEvent,
@@ -19,11 +18,12 @@ import { validateBotConfig } from "@/domain/risk";
 import { getSqlite } from "@/db/client";
 import { ensureDatabase } from "@/db/init";
 import { defaultBotConfig } from "@/features/bots/sample-data";
+import { buildChallengeRiskPreflight, type ChallengeRiskPreflight } from "@/features/bots/challenge-risk";
 import { PaperGridEngine } from "@/features/paper-trading/engine";
 import { ProprExecutionAdapter } from "@/features/execution/propr-adapter";
-import type { ExecutionOrder } from "@/features/execution/types";
+import type { ExecutionOrder, ExecutionPosition } from "@/features/execution/types";
 import { getMarketSnapshots } from "@/features/market-data/service";
-import { getProprChallengeSummary } from "@/features/propr/challenge-summary";
+import { getProprChallengeSummary, type ProprChallengeSummary } from "@/features/propr/challenge-summary";
 import { checkProprLiveReadiness } from "@/features/propr/readiness";
 
 interface BotJoinedRow {
@@ -45,6 +45,7 @@ interface BotJoinedRow {
   take_profit: string | null;
   stop_loss: string | null;
   max_drawdown_pct: string;
+  challenge_daily_loss_stop_pct: string | null;
   auto_pause_out_of_range: 0 | 1;
   auto_recenter: 0 | 1;
 }
@@ -130,6 +131,17 @@ export interface PaperReconciliationSummary {
   errors: Array<{ botId: string; message: string }>;
 }
 
+export interface ProprEmergencyStopSummary {
+  ok: boolean;
+  reason: string;
+  stoppedBotIds: string[];
+  cancelledOrders: number;
+  positionsFound: number;
+  closeOrders: number;
+  errors: string[];
+  checkedAt: string;
+}
+
 export function bootstrapBots() {
   ensureDatabase();
   removeLegacySampleBots();
@@ -170,7 +182,7 @@ export function listBots(): Bot[] {
       `
       SELECT b.*, c.lower_price, c.upper_price, c.grid_count, c.capital_allocation,
         c.position_side, c.leverage, c.spacing, c.order_size, c.take_profit, c.stop_loss,
-        c.max_drawdown_pct, c.auto_pause_out_of_range, c.auto_recenter
+        c.max_drawdown_pct, c.challenge_daily_loss_stop_pct, c.auto_pause_out_of_range, c.auto_recenter
       FROM bots b
       JOIN bot_configs c ON c.bot_id = b.id
       ORDER BY b.updated_at DESC
@@ -187,7 +199,7 @@ export function getBot(id: string): Bot | null {
       `
       SELECT b.*, c.lower_price, c.upper_price, c.grid_count, c.capital_allocation,
         c.position_side, c.leverage, c.spacing, c.order_size, c.take_profit, c.stop_loss,
-        c.max_drawdown_pct, c.auto_pause_out_of_range, c.auto_recenter
+        c.max_drawdown_pct, c.challenge_daily_loss_stop_pct, c.auto_pause_out_of_range, c.auto_recenter
       FROM bots b
       JOIN bot_configs c ON c.bot_id = b.id
       WHERE b.id = ?
@@ -500,7 +512,41 @@ export async function stopBot(id: string) {
   tx();
 }
 
-export async function reconcileProprBot(id: string): Promise<{ syncedOrders: number; insertedFills: number; placedExitOrders: number }> {
+export async function triggerProprEmergencyStop(reason = "Manual kill switch"): Promise<ProprEmergencyStopSummary> {
+  bootstrapBots();
+  const adapter = new ProprExecutionAdapter();
+  const health = await adapter.health();
+  if (!health.ok) {
+    const message = health.reason ?? "Propr adapter is not healthy.";
+    addEvent({
+      type: "bot.propr_emergency_stop_failed",
+      severity: "error",
+      message: `Propr emergency stop could not start: ${message}`,
+      payload: { reason },
+    });
+    throw new Error(message);
+  }
+
+  const challenge = await getProprChallengeSummary(getRuntimeMetrics()).catch(() => undefined);
+  const summary = await executeProprAccountEmergencyStop(adapter, {
+    reason,
+    challenge,
+    eventType: "bot.propr_emergency_stop",
+  });
+
+  if (!summary.ok) {
+    throw new Error(summary.errors[0] ?? "Propr emergency stop completed with errors.");
+  }
+
+  return summary;
+}
+
+export async function reconcileProprBot(id: string): Promise<{
+  syncedOrders: number;
+  insertedFills: number;
+  placedExitOrders: number;
+  safetyStopTriggered?: boolean;
+}> {
   const bot = getBot(id);
   if (!bot) throw new Error("Bot not found.");
   if (bot.config.mode !== "propr_live") {
@@ -508,6 +554,11 @@ export async function reconcileProprBot(id: string): Promise<{ syncedOrders: num
   }
 
   const adapter = new ProprExecutionAdapter();
+  const safetyStopTriggered = await enforceProprChallengeSafetyStop(bot, adapter);
+  if (safetyStopTriggered) {
+    return { syncedOrders: 0, insertedFills: 0, placedExitOrders: 0, safetyStopTriggered: true };
+  }
+
   const [openProviderOrders, trades] = await Promise.all([
     adapter.getOpenOrders(bot.config.pair),
     adapter.getTrades(bot.config.pair),
@@ -594,6 +645,162 @@ export async function reconcileProprBot(id: string): Promise<{ syncedOrders: num
   });
 
   return { syncedOrders, insertedFills, placedExitOrders };
+}
+
+async function enforceProprChallengeSafetyStop(bot: Bot, adapter: ProprExecutionAdapter): Promise<boolean> {
+  const challenge = await getProprChallengeSummary(getRuntimeMetrics());
+  if (challenge.source !== "propr_live") return false;
+
+  const equity = decimal(challenge.equity);
+  const dailyStopPct = decimal(bot.config.challengeDailyLossStopPct ?? "2.75");
+  const dailyStopAmount = decimal(challenge.startingBalance).mul(dailyStopPct).div(100);
+  const dailyFloor = decimal(challenge.dayStartEquity).minus(dailyStopAmount);
+  const drawdownFloor = decimal(challenge.drawdownLimit);
+  const breachedSafetyFloor = equity.lte(dailyFloor) || equity.lte(drawdownFloor);
+  if (!breachedSafetyFloor) return false;
+
+  const reason = equity.lte(dailyFloor)
+    ? `Challenge equity ${toDecimalString(equity, 2)} reached the ${toDecimalString(dailyStopPct, 2)}% daily stop floor ${toDecimalString(dailyFloor, 2)}.`
+    : `Challenge equity ${toDecimalString(equity, 2)} reached drawdown floor ${toDecimalString(drawdownFloor, 2)}.`;
+  await executeProprAccountEmergencyStop(adapter, {
+    reason,
+    challenge,
+    referenceBotId: bot.id,
+    eventType: "bot.propr_safety_stop",
+    extraPayload: {
+      equity: challenge.equity,
+      dailyFloor: toDecimalString(dailyFloor, 2),
+      drawdownFloor: toDecimalString(drawdownFloor, 2),
+    },
+  });
+
+  return true;
+}
+
+async function executeProprAccountEmergencyStop(
+  adapter: ProprExecutionAdapter,
+  options: {
+    reason: string;
+    challenge?: ProprChallengeSummary;
+    referenceBotId?: string;
+    eventType: "bot.propr_emergency_stop" | "bot.propr_safety_stop";
+    extraPayload?: Record<string, unknown>;
+  },
+): Promise<ProprEmergencyStopSummary> {
+  const now = new Date().toISOString();
+  const activeLiveBots = listBots().filter(isActiveProprRuntimeBot);
+  const stoppedBotIds = activeLiveBots.length
+    ? activeLiveBots.map((item) => item.id)
+    : options.referenceBotId
+      ? [options.referenceBotId]
+      : [];
+  const referenceBotId = options.referenceBotId ?? stoppedBotIds[0];
+  const errors: string[] = [];
+  let cancelledOrders: ExecutionOrder[] = [];
+  let cancelAllSucceeded = false;
+  let positions: ExecutionPosition[] = [];
+  let closeOrders = 0;
+
+  try {
+    cancelledOrders = await adapter.cancelAll();
+    cancelAllSucceeded = true;
+  } catch (error) {
+    errors.push(`cancelAll failed: ${errorMessage(error)}`);
+  }
+
+  try {
+    positions = await adapter.getPositions();
+  } catch (error) {
+    errors.push(`position sync failed: ${errorMessage(error)}`);
+  }
+
+  for (const position of positions) {
+    try {
+      await adapter.placeOrder({
+        clientOrderId: ulid(),
+        botId: referenceBotId,
+        asset: position.asset,
+        side: position.positionSide === "long" ? "sell" : "buy",
+        positionSide: position.positionSide,
+        type: "market",
+        quantity: position.quantity,
+        timeInForce: "IOC",
+        reduceOnly: true,
+        closePosition: true,
+      });
+      closeOrders += 1;
+    } catch (error) {
+      errors.push(`close ${formatMarketSymbol(position.asset)} ${position.positionSide} failed: ${errorMessage(error)}`);
+    }
+  }
+
+  const ok = errors.length === 0;
+  const nextStatus: BotStatus = ok ? "stopped" : "error";
+  const tx = getSqlite().transaction(() => {
+    for (const botId of stoppedBotIds) {
+      if (cancelAllSucceeded) {
+        getSqlite()
+          .prepare("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE bot_id = ? AND status = 'open'")
+          .run(now, botId);
+      }
+      getSqlite().prepare("UPDATE bots SET status = ?, updated_at = ? WHERE id = ?").run(nextStatus, now, botId);
+      getSqlite()
+        .prepare("UPDATE bot_runtime_state SET state = ?, equity = ?, pnl = ?, updated_at = ? WHERE bot_id = ?")
+        .run(nextStatus, options.challenge?.equity ?? "0", options.challenge?.realizedPnl ?? "0", now, botId);
+      addEvent({
+        botId,
+        type: options.eventType,
+        severity: ok ? "warning" : "error",
+        message: ok
+          ? `Propr emergency stop completed. ${options.reason}`
+          : `Propr emergency stop attempted with errors. ${options.reason}`,
+        payload: {
+          ...options.extraPayload,
+          cancelledOrders: cancelledOrders.length,
+          positionsFound: positions.length,
+          closeOrders,
+          errors,
+        },
+      });
+    }
+
+    if (!stoppedBotIds.length) {
+      addEvent({
+        type: options.eventType,
+        severity: ok ? "warning" : "error",
+        message: ok
+          ? `Propr account emergency stop completed. ${options.reason}`
+          : `Propr account emergency stop attempted with errors. ${options.reason}`,
+        payload: {
+          ...options.extraPayload,
+          cancelledOrders: cancelledOrders.length,
+          positionsFound: positions.length,
+          closeOrders,
+          errors,
+        },
+      });
+    }
+  });
+  tx();
+
+  return {
+    ok,
+    reason: options.reason,
+    stoppedBotIds,
+    cancelledOrders: cancelledOrders.length,
+    positionsFound: positions.length,
+    closeOrders,
+    errors,
+    checkedAt: now,
+  };
+}
+
+function isActiveProprRuntimeBot(bot: Bot): boolean {
+  return bot.config.mode === "propr_live" && ["live", "running", "out_of_range"].includes(bot.status);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Unknown Propr emergency stop error";
 }
 
 export function simulateNextPaperFill(id: string) {
@@ -791,6 +998,22 @@ export function getRuntimeMetrics(): RuntimeMetrics {
   };
 }
 
+export async function getChallengeRiskPreflightForConfig(
+  config: GridConfig,
+  botId = "",
+): Promise<ChallengeRiskPreflight> {
+  const [challenge, markets] = await Promise.all([getProprChallengeSummary(getRuntimeMetrics()), getMarketSnapshots()]);
+  const markPrices = Object.fromEntries(markets.map((market) => [market.asset, market.mid]));
+  return buildChallengeRiskPreflight({
+    config,
+    challenge,
+    committedBots: listBots(),
+    currentBotId: botId,
+    markPrice: markPrices[config.pair],
+    markPrices,
+  });
+}
+
 function insertBotRows(name: string, config: GridConfig, id: string, status: BotStatus, timestamp: string) {
   getSqlite()
     .prepare("INSERT INTO bots (id, name, status, mode, pair, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
@@ -800,9 +1023,9 @@ function insertBotRows(name: string, config: GridConfig, id: string, status: Bot
       `
       INSERT INTO bot_configs (
         id, bot_id, position_side, lower_price, upper_price, grid_count, capital_allocation,
-        leverage, spacing, order_size, take_profit, stop_loss, max_drawdown_pct,
+        leverage, spacing, order_size, take_profit, stop_loss, max_drawdown_pct, challenge_daily_loss_stop_pct,
         auto_pause_out_of_range, auto_recenter, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     )
     .run(
@@ -819,6 +1042,7 @@ function insertBotRows(name: string, config: GridConfig, id: string, status: Bot
       config.takeProfit ?? null,
       config.stopLoss ?? null,
       config.maxDrawdownPct,
+      config.challengeDailyLossStopPct,
       config.autoPauseOutOfRange ? 1 : 0,
       config.autoRecenter ? 1 : 0,
       timestamp,
@@ -995,7 +1219,7 @@ function pairedOrder(config: GridConfig, filled: PersistedOrder): ExecutionOrder
     side,
     positionSide: config.positionSide,
     type: "limit",
-    quantity: level.quantity,
+    quantity: filled.cumulative_quantity !== "0" ? filled.cumulative_quantity : filled.quantity,
     price: level.price,
     status: "open",
     cumulativeQuantity: "0",
@@ -1016,48 +1240,10 @@ function openOrderExposure(orders: ExecutionOrder[]): string {
 }
 
 async function assertChallengeRiskBudget(botId: string, config: GridConfig) {
-  if (!config.stopLoss) {
-    throw new Error("Stop loss is required before deploying a Propr challenge bot.");
+  const preflight = await getChallengeRiskPreflightForConfig(config, botId);
+  if (preflight.status !== "pass") {
+    throw new Error(preflight.blockers[0] ?? "Challenge risk preflight failed.");
   }
-
-  const challenge = await getProprChallengeSummary(getRuntimeMetrics());
-  if (challenge.source !== "propr_live") {
-    throw new Error(challenge.warning ?? "Active Propr challenge could not be synced.");
-  }
-
-  const candidateWorstCase = decimal(estimateGridPreview(config).worstCaseLoss);
-  if (!candidateWorstCase.gt(0)) {
-    throw new Error("Worst-case loss must be positive and directionally valid before deployment.");
-  }
-
-  const committedWorstCase = listBots()
-    .filter(
-      (bot) =>
-        bot.id !== botId &&
-        bot.config.mode === "propr_live" &&
-        ["live", "running", "out_of_range"].includes(bot.status),
-    )
-    .reduce((total, bot) => total.plus(estimateGridPreview(bot.config).worstCaseLoss), decimal(0));
-
-  const totalWorstCase = committedWorstCase.plus(candidateWorstCase);
-  const dailyRemaining = remainingFromUsage(challenge.dailyLossLimit, challenge.dailyLossUsedPct);
-  const drawdownBudget = decimal(challenge.highWaterMark).minus(challenge.drawdownLimit);
-  const drawdownRemaining = drawdownBudget.mul(decimal(100).minus(challenge.drawdownUsedPct)).div(100);
-  const hardBudget = DecimalMin(dailyRemaining, drawdownRemaining);
-
-  if (totalWorstCase.gt(hardBudget)) {
-    throw new Error(
-      `Bot worst-case risk ${toDecimalString(totalWorstCase, 2)} USDC exceeds remaining challenge risk budget ${toDecimalString(hardBudget, 2)} USDC.`,
-    );
-  }
-}
-
-function remainingFromUsage(limit: string, usedPct: string) {
-  return decimal(limit).mul(decimal(100).minus(usedPct)).div(100);
-}
-
-function DecimalMin(a: ReturnType<typeof decimal>, b: ReturnType<typeof decimal>) {
-  return a.lte(b) ? a : b;
 }
 
 function midpoint(config: GridConfig): string {
@@ -1088,6 +1274,7 @@ function mapBot(row: BotJoinedRow): Bot {
       takeProfit: row.take_profit ?? undefined,
       stopLoss: row.stop_loss ?? undefined,
       maxDrawdownPct: row.max_drawdown_pct,
+      challengeDailyLossStopPct: row.challenge_daily_loss_stop_pct ?? "2.75",
       autoPauseOutOfRange: Boolean(row.auto_pause_out_of_range),
       autoRecenter: Boolean(row.auto_recenter),
       mode: row.mode,
