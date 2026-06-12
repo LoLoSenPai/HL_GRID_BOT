@@ -1,10 +1,13 @@
 import { AlertTriangle, CheckCircle2 } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { decimal, toDecimalString } from "@/domain/decimal";
 import type { ProprChallengeSummary } from "@/features/propr/challenge-summary";
 import { cn } from "@/lib/utils";
 
 export function ChallengePanel({ challenge }: { challenge: ProprChallengeSummary }) {
+  const dailySafety = dailySafetyStop(challenge);
+
   return (
     <Card className="rounded-lg">
       <CardHeader className="pb-3">
@@ -33,6 +36,27 @@ export function ChallengePanel({ challenge }: { challenge: ProprChallengeSummary
           <ChallengeMetric label="Equity" value={`${challenge.equity} USDC`} detail={`Balance ${challenge.balance}`} />
           <ChallengeMetric label="Profit target" value={`${challenge.profitProgressPct}%`} detail={`${challenge.realizedPnl} / ${challenge.profitTarget} USDC`} />
           <ChallengeMetric label="Available" value={`${challenge.availableBalance ?? "n/a"} USDC`} detail={challenge.accountId ? `Account ${challenge.accountId}` : "No account synced"} />
+        </div>
+
+        <div
+          className={cn(
+            "rounded-lg border p-3",
+            dailySafety.status === "safe" && "border-primary/30 bg-primary/10",
+            dailySafety.status === "warning" && "border-amber-300/30 bg-amber-300/10",
+            dailySafety.status === "stop" && "border-destructive/30 bg-destructive/10",
+          )}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-xs text-muted-foreground">Daily safety stop</div>
+              <div className="mt-1 metric-mono text-xl font-semibold">{dailySafety.status.toUpperCase()}</div>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <SafetyMetric label="Equity" value={`${challenge.equity} USDC`} />
+              <SafetyMetric label="Floor 2.75%" value={`${dailySafety.floor} USDC`} />
+              <SafetyMetric label="Distance" value={`${dailySafety.remaining} USDC`} />
+            </div>
+          </div>
         </div>
 
         <div className="grid gap-3 md:grid-cols-3">
@@ -64,6 +88,35 @@ export function ChallengePanel({ challenge }: { challenge: ProprChallengeSummary
       </CardContent>
     </Card>
   );
+}
+
+function SafetyMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-[120px] rounded-md border bg-background/50 p-2">
+      <div className="text-muted-foreground">{label}</div>
+      <div className="metric-mono mt-1 font-semibold text-foreground">{value}</div>
+    </div>
+  );
+}
+
+function dailySafetyStop(challenge: ProprChallengeSummary): {
+  floor: string;
+  remaining: string;
+  usedPct: string;
+  status: "safe" | "warning" | "stop";
+} {
+  const stopAmount = decimal(challenge.startingBalance).mul("2.75").div(100);
+  const floor = decimal(challenge.dayStartEquity).minus(stopAmount);
+  const remaining = decimal(challenge.equity).minus(floor);
+  const used = decimal(challenge.dayStartEquity).minus(challenge.equity);
+  const usedPct = stopAmount.gt(0) ? used.div(stopAmount).mul(100) : decimal(0);
+
+  return {
+    floor: toDecimalString(floor, 2),
+    remaining: toDecimalString(remaining, 2),
+    usedPct: toDecimalString(usedPct, 1),
+    status: remaining.lte(0) ? "stop" : usedPct.gte(80) ? "warning" : "safe",
+  };
 }
 
 function ChallengeMetric({ label, value, detail }: { label: string; value: string; detail: string }) {

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, Minus, Play, Plus, Rocket, ShieldCheck, Square, TrendingDown, TrendingUp, Zap } from "lucide-react";
+import { AlertTriangle, Minus, Play, Plus, Rocket, ShieldCheck, Square, TrendingDown, TrendingUp, X, Zap } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -32,6 +32,7 @@ import {
   type TradingMode,
 } from "@/domain/types";
 import { validateBotConfig } from "@/domain/risk";
+import type { ProprChallengeSummary } from "@/features/propr/challenge-summary";
 import { cn } from "@/lib/utils";
 import { useTerminalStore } from "@/store/use-terminal-store";
 
@@ -57,10 +58,15 @@ interface ChallengeRiskPreflight {
   candidateStopBuffer: string;
   candidateAutoOrderSize: string;
   candidateEntryOrderCount: number;
+  candidateTotalEntryNotional: string;
   committedWorstCase: string;
   dailyRemaining: string;
   dailyStopPct: string;
   dailyStopAmount: string;
+  dailyStopFloor: string;
+  dailyDistanceToStop: string;
+  dailyStopUsedPct: string;
+  dailyStatus: "safe" | "warning" | "stop";
   drawdownRemaining: string;
   remainingBudget: string;
   recommendedCapitalAllocation: string;
@@ -247,6 +253,12 @@ function ChallengeRiskPreflightPanel({
         <PreviewMetric label="Drawdown left" value={`$${preflight?.drawdownRemaining ?? "..."}`} />
         <PreviewMetric label="Auto order size" value={`$${preflight?.candidateAutoOrderSize ?? "..."}`} />
         <PreviewMetric label="Entry orders" value={preflight ? String(preflight.candidateEntryOrderCount) : "..."} />
+        <PreviewMetric
+          label="Daily status"
+          value={preflight ? preflight.dailyStatus.toUpperCase() : "..."}
+          tone={preflight?.dailyStatus === "safe" ? "primary" : "destructive"}
+        />
+        <PreviewMetric label="Daily floor" value={`$${preflight?.dailyStopFloor ?? "..."}`} />
       </div>
 
       <div className="mt-3 rounded-md border bg-background/50 p-2 text-xs text-muted-foreground">
@@ -413,6 +425,95 @@ function ModeHint({ mode }: { mode: TradingMode }) {
   );
 }
 
+function DeployPreviewModal({
+  open,
+  config,
+  preflight,
+  preview,
+  challenge,
+  pending,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  config: GridConfig;
+  preflight: ChallengeRiskPreflight | null;
+  preview: GridPreview;
+  challenge?: ProprChallengeSummary;
+  pending: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  if (!open) return null;
+
+  const account = challenge?.accountId ?? "No account synced";
+  const canConfirm = preflight?.status === "pass" && !pending;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
+      <div className="w-full max-w-2xl rounded-lg border bg-card shadow-xl">
+        <div className="flex items-start justify-between gap-4 border-b p-4">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <Rocket className="size-4 text-primary" />
+              Deploy preview
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              Confirms the exact Propr challenge order plan before sending entry orders.
+            </div>
+          </div>
+          <Button type="button" variant="ghost" size="icon-sm" onClick={onClose} aria-label="Close deploy preview">
+            <X />
+          </Button>
+        </div>
+
+        <div className="grid gap-3 p-4 sm:grid-cols-2">
+          <PreviewMetric label="Asset" value={formatMarketPair(config.pair)} />
+          <PreviewMetric label="Account" value={account} />
+          <PreviewMetric label="Leverage" value={`${config.leverage}x`} />
+          <PreviewMetric label="Direction" value={config.positionSide.toUpperCase()} />
+          <PreviewMetric label="Entry orders" value={preflight ? String(preflight.candidateEntryOrderCount) : "..."} />
+          <PreviewMetric label="Order size" value={`$${preflight?.candidateAutoOrderSize ?? "..."}`} />
+          <PreviewMetric label="Entry notional" value={`$${preflight?.candidateTotalEntryNotional ?? preview.totalNotional}`} />
+          <PreviewMetric label="SL worst case" value={`$${preflight?.candidateWorstCase ?? "..."}`} tone="destructive" />
+          <PreviewMetric label="Daily budget left" value={`$${preflight?.dailyRemaining ?? "..."}`} tone="primary" />
+          <PreviewMetric label="Daily floor" value={`$${preflight?.dailyStopFloor ?? "..."}`} />
+        </div>
+
+        <div className="mx-4 rounded-md border bg-muted/20 p-3 text-xs text-muted-foreground">
+          <div>
+            Daily status:{" "}
+            <span
+              className={cn(
+                "metric-mono font-semibold",
+                preflight?.dailyStatus === "safe" && "text-primary",
+                preflight?.dailyStatus !== "safe" && "text-destructive",
+              )}
+            >
+              {preflight?.dailyStatus.toUpperCase() ?? "..."}
+            </span>
+          </div>
+          <div className="mt-1">
+            Propr hard daily limit stays 3%; this bot uses the internal {preflight?.dailyStopPct ?? "2.75"}% safety
+            floor.
+          </div>
+          {preflight?.blockers[0] ? <div className="mt-2 text-destructive">{preflight.blockers[0]}</div> : null}
+        </div>
+
+        <div className="flex flex-wrap justify-end gap-2 p-4">
+          <Button type="button" variant="outline" onClick={onClose}>
+            Review config
+          </Button>
+          <Button type="button" disabled={!canConfirm} onClick={onConfirm}>
+            <Rocket data-icon="inline-start" />
+            {pending ? "Deploying" : "Confirm deploy"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function safeNumber(value?: string): number {
   if (!value) return Number.NaN;
   const parsed = Number(value);
@@ -426,11 +527,18 @@ function formatCompactPrice(value: number): string {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 3 }).format(value);
 }
 
-export function GridConfigPanel({ marketSnapshots = [] }: { marketSnapshots?: MarketSnapshot[] }) {
+export function GridConfigPanel({
+  marketSnapshots = [],
+  challenge,
+}: {
+  marketSnapshots?: MarketSnapshot[];
+  challenge?: ProprChallengeSummary;
+}) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [actionError, setActionError] = useState<string | null>(null);
   const [challengePreflight, setChallengePreflight] = useState<ChallengeRiskPreflight | null>(null);
+  const [deployPreviewOpen, setDeployPreviewOpen] = useState(false);
   const marketDefaultsAppliedRef = useRef(false);
   const config = useTerminalStore((state) => state.config);
   const mode = useTerminalStore((state) => state.mode);
@@ -536,6 +644,11 @@ export function GridConfigPanel({ marketSnapshots = [] }: { marketSnapshots?: Ma
     });
   };
 
+  const confirmDeployFromPreview = () => {
+    setDeployPreviewOpen(false);
+    submitBotConfig();
+  };
+
   const stopActiveBot = () => {
     setActionError(null);
     startTransition(async () => {
@@ -550,6 +663,7 @@ export function GridConfigPanel({ marketSnapshots = [] }: { marketSnapshots?: Ma
   };
 
   return (
+    <>
     <Card className="rounded-lg">
       <CardHeader className="pb-3">
         <CardTitle className="flex items-center gap-2 text-sm">
@@ -711,7 +825,7 @@ export function GridConfigPanel({ marketSnapshots = [] }: { marketSnapshots?: Ma
         ) : null}
 
         <div className="grid grid-cols-2 gap-2">
-          <Button disabled={!canSubmit} onClick={submitBotConfig}>
+          <Button disabled={!canSubmit} onClick={liveCandidateMode ? () => setDeployPreviewOpen(true) : submitBotConfig}>
             {liveCandidateMode ? <Rocket data-icon="inline-start" /> : <Play data-icon="inline-start" />}
             {pending ? "Working" : liveCandidateMode ? "Deploy Bot" : `Start ${config.positionSide.toUpperCase()}`}
           </Button>
@@ -722,5 +836,16 @@ export function GridConfigPanel({ marketSnapshots = [] }: { marketSnapshots?: Ma
         </div>
       </CardContent>
     </Card>
+    <DeployPreviewModal
+      open={deployPreviewOpen}
+      config={config}
+      preflight={challengePreflight}
+      preview={preview}
+      challenge={challenge}
+      pending={pending}
+      onClose={() => setDeployPreviewOpen(false)}
+      onConfirm={confirmDeployFromPreview}
+    />
+    </>
   );
 }

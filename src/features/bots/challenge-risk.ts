@@ -14,10 +14,15 @@ export interface ChallengeRiskPreflight {
   candidateStopBuffer: string;
   candidateAutoOrderSize: string;
   candidateEntryOrderCount: number;
+  candidateTotalEntryNotional: string;
   committedWorstCase: string;
   dailyRemaining: string;
   dailyStopPct: string;
   dailyStopAmount: string;
+  dailyStopFloor: string;
+  dailyDistanceToStop: string;
+  dailyStopUsedPct: string;
+  dailyStatus: "safe" | "warning" | "stop";
   drawdownRemaining: string;
   hardBudget: string;
   remainingBudget: string;
@@ -50,11 +55,13 @@ export function buildChallengeRiskPreflight(input: {
     );
   const dailyStopPct = decimal(input.config.challengeDailyLossStopPct ?? "2.75");
   const dailyStopAmount = decimal(input.challenge.startingBalance).mul(dailyStopPct).div(100);
+  const dailyStopFloor = decimal(input.challenge.dayStartEquity).minus(dailyStopAmount);
   const dailyLossUsed = DecimalMax(
     decimal(0),
     decimal(input.challenge.dayStartEquity).minus(input.challenge.equity),
   );
   const dailyRemaining = DecimalMax(decimal(0), dailyStopAmount.minus(dailyLossUsed));
+  const dailyStopUsedPct = dailyStopAmount.gt(0) ? dailyLossUsed.div(dailyStopAmount).mul(100) : decimal(0);
   const drawdownBudget = decimal(input.challenge.highWaterMark).minus(input.challenge.drawdownLimit);
   const drawdownRemaining = drawdownBudget.mul(decimal(100).minus(input.challenge.drawdownUsedPct)).div(100);
   const hardBudget = DecimalMin(dailyRemaining, drawdownRemaining);
@@ -90,10 +97,15 @@ export function buildChallengeRiskPreflight(input: {
     candidateStopBuffer: candidateRisk.stopBuffer,
     candidateAutoOrderSize: candidateRisk.autoOrderSize,
     candidateEntryOrderCount: candidateRisk.entryOrderCount,
+    candidateTotalEntryNotional: candidateRisk.totalEntryNotional,
     committedWorstCase: toDecimalString(committedWorstCase, 2),
     dailyRemaining: toDecimalString(dailyRemaining, 2),
     dailyStopPct: toDecimalString(dailyStopPct, 2),
     dailyStopAmount: toDecimalString(dailyStopAmount, 2),
+    dailyStopFloor: toDecimalString(dailyStopFloor, 2),
+    dailyDistanceToStop: toDecimalString(dailyRemaining, 2),
+    dailyStopUsedPct: toDecimalString(dailyStopUsedPct, 1),
+    dailyStatus: dailyRemaining.lte(0) ? "stop" : dailyStopUsedPct.gte(80) ? "warning" : "safe",
     drawdownRemaining: toDecimalString(drawdownRemaining, 2),
     hardBudget: toDecimalString(hardBudget, 2),
     remainingBudget: toDecimalString(remainingBudget, 2),

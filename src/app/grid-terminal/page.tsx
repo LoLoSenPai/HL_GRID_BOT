@@ -1,10 +1,12 @@
 import { RefreshCw } from "lucide-react";
 
 import { ActivityFeed } from "@/components/activity/activity-feed";
+import { LiveAccountStatePanel } from "@/components/trading/live-account-state-panel";
 import { ReactiveTerminalChart } from "@/components/charts/reactive-terminal-chart";
 import { GridConfigPanel } from "@/components/trading/grid-config-panel";
 import { ReactiveTerminalMetrics } from "@/components/trading/reactive-terminal-metrics";
 import { StatusBadge } from "@/components/trading/status-badge";
+import { SyncStatusPanel } from "@/components/trading/sync-status-panel";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -60,6 +62,10 @@ export default async function GridTerminalPage() {
               <ReactiveTerminalChart initialConfig={config} candles={candles} />
             </CardContent>
           </Card>
+          <div className="grid gap-4 xl:grid-cols-[360px_minmax(0,1fr)]">
+            <SyncStatusPanel />
+            <LiveAccountStatePanel />
+          </div>
           {activeBot ? (
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="text-xs text-muted-foreground">
@@ -124,7 +130,7 @@ export default async function GridTerminalPage() {
             </TabsContent>
           </Tabs>
         </div>
-        <GridConfigPanel marketSnapshots={markets} />
+        <GridConfigPanel marketSnapshots={markets} challenge={challenge} />
       </div>
     </div>
   );
