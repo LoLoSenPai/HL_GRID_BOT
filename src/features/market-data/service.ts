@@ -13,7 +13,7 @@ import { logger } from "@/lib/logger";
 const MARKET_SOURCE = "hyperliquid_public_info";
 const FALLBACK_SOURCE = "sample_fallback";
 const DEFAULT_CANDLE_INTERVAL = "15m";
-const DEFAULT_CANDLE_LOOKBACK_HOURS = 24;
+const DEFAULT_CANDLE_LOOKBACK_HOURS = 72;
 
 export interface MarketSnapshotFeed {
   data: MarketSnapshot[];
@@ -69,10 +69,10 @@ export function buildFallbackCandles(config: GridConfig): Candle[] {
   const now = Math.floor(Date.now() / 1000);
   const reference = decimal(config.lowerPrice).plus(config.upperPrice).div(2).toNumber();
 
-  return Array.from({ length: 96 }, (_, index) => {
-    const time = now - (96 - index) * 900;
+  return Array.from({ length: 288 }, (_, index) => {
+    const time = now - (288 - index) * 900;
     const wave = Math.sin(index / 6) * reference * 0.012;
-    const drift = (index - 48) * reference * 0.00018;
+    const drift = (index - 144) * reference * 0.00018;
     const open = reference + wave + drift;
     const close = open + Math.cos(index / 5) * reference * 0.004;
     const high = Math.max(open, close) + reference * 0.006;

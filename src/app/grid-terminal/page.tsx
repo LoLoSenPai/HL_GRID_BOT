@@ -1,23 +1,24 @@
 import { RefreshCw } from "lucide-react";
-import Link from "next/link";
 
 import { ActivityFeed } from "@/components/activity/activity-feed";
 import { ReactiveTerminalChart } from "@/components/charts/reactive-terminal-chart";
+import { ReactiveChallengeTicker } from "@/components/trading/reactive-challenge-ticker";
+import { ReactiveTerminalBotsTable } from "@/components/trading/reactive-terminal-bots-table";
 import { BotPerformanceStrip } from "@/components/trading/bot-performance-strip";
 import { GridConfigPanel } from "@/components/trading/grid-config-panel";
 import { LiveAccountStatePanel, LiveAccountStatePrefetch } from "@/components/trading/live-account-state-panel";
 import { PnlBreakdownPanel } from "@/components/trading/pnl-breakdown-panel";
+import { ReactiveRuntimeMark } from "@/components/trading/reactive-runtime-mark";
 import { ReactiveTerminalMetrics } from "@/components/trading/reactive-terminal-metrics";
 import { StatusBadge } from "@/components/trading/status-badge";
 import { SyncStatusPanel } from "@/components/trading/sync-status-panel";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { decimal, toDecimalString } from "@/domain/decimal";
 import { deriveDefaultGridConfigFromPrice } from "@/domain/grid-defaults";
 import { formatMarketPair, formatMarketSymbol } from "@/domain/markets";
 import { reconcilePaperRuntimeAction, reconcileProprRuntimeAction } from "@/features/bots/actions";
-import { getBotPerformance, type BotPerformanceSummary } from "@/features/bots/performance";
+import { getBotPerformance, getBotPerformanceRows, type BotPerformanceSummary } from "@/features/bots/performance";
 import {
   getBotRuntimeState,
   getRuntimeMetrics,
@@ -30,7 +31,10 @@ import {
 } from "@/features/bots/repository";
 import { defaultBotConfig } from "@/features/bots/sample-data";
 import { getCandlesForConfig, getMarketSnapshots } from "@/features/market-data/service";
-import { getProprChallengeSummary, type ProprChallengeSummary } from "@/features/propr/challenge-summary";
+import { ProprExecutionAdapter } from "@/features/execution/propr-adapter";
+import type { ExecutionPosition } from "@/features/execution/types";
+import { getProprChallengeSummary } from "@/features/propr/challenge-summary";
+import { mergeProprWsPositionSnapshots } from "@/features/propr/ws-position-cache";
 import type { Bot } from "@/domain/types";
 
 export const dynamic = "force-dynamic";
@@ -44,8 +48,9 @@ export default async function GridTerminalPage({
   const params = await searchParams;
   const requestedBotId = Array.isArray(params.botId) ? params.botId[0] : params.botId;
   const requestedBot = requestedBotId ? bots.find((bot) => bot.id === requestedBotId) : undefined;
+  const terminalBots = bots.filter(isTerminalActiveBot);
   const activeBot =
-    requestedBot ?? bots.find((bot) => ["paper", "running", "live", "out_of_range"].includes(bot.status)) ?? bots[0];
+    requestedBot ?? terminalBots.find((bot) => ["paper", "running", "live", "out_of_range"].includes(bot.status)) ?? terminalBots[0] ?? bots[0];
   const baseConfig = activeBot?.config ?? defaultBotConfig;
   const metrics = getRuntimeMetrics();
   const events = activeBot ? listEvents(20, activeBot.id) : [];
@@ -57,13 +62,25 @@ export default async function GridTerminalPage({
   const activeChallengeBot =
     activeBot && isChallengeBot && ["live", "running", "out_of_range"].includes(activeBot.status)
       ? {
+          id: activeBot.id,
           name: activeBot.name,
           status: activeBot.status,
           pair: activeBot.config.pair,
           openOrders: orders.filter((order) => order.status === "open").length,
         }
       : null;
-  const [markets, challenge] = await Promise.all([getMarketSnapshots(), getProprChallengeSummary(metrics)]);
+  const [markets, challenge, livePositions] = await Promise.all([
+    getMarketSnapshots(),
+    getProprChallengeSummary(metrics),
+    loadLivePositions(),
+  ]);
+  const initialLiveSnapshot = {
+    checkedAt: new Date().toISOString(),
+    markets,
+    challenge,
+    bots: getBotPerformanceRows(terminalBots),
+    livePositions,
+  };
   const market = markets.find((snapshot) => snapshot.asset === baseConfig.pair) ?? {
     asset: baseConfig.pair,
     mid: "0",
@@ -96,34 +113,49 @@ export default async function GridTerminalPage({
               {formatMarketPair(config.pair)} perp / {config.positionSide.toUpperCase()} / Propr challenge
             </div>
           </div>
-          <ReactiveTerminalMetrics initialPair={config.pair} markets={markets} challenge={challenge} />
+          <ReactiveTerminalMetrics
+            initialPair={config.pair}
+            markets={markets}
+            challenge={challenge}
+            initialSnapshot={initialLiveSnapshot}
+          />
         </div>
-        <BotSwitcher bots={bots} activeBotId={activeBot?.id} />
       </div>
-      <ChallengeTicker challenge={challenge} />
+      <ReactiveChallengeTicker initialChallenge={challenge} initialSnapshot={initialLiveSnapshot} />
 
       <div className="grid min-h-0 flex-1 grid-cols-1 overflow-hidden lg:grid-cols-[minmax(0,1fr)_380px]">
         <main className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)_300px] overflow-hidden lg:border-r">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2 text-xs">
             <div className="flex items-center gap-3">
               <span className="font-medium text-foreground">Chart</span>
-              <span className="text-muted-foreground">1h candles / grid levels / SL / TP</span>
+              <span className="text-muted-foreground">15m candles / grid levels / SL / TP</span>
             </div>
             <div className="text-muted-foreground">
-              Runtime mark:{" "}
-              <span className="metric-mono text-foreground">{runtimeState?.lastPrice ?? market.mid ?? "not synced"}</span>
+              Live mark:{" "}
+              <ReactiveRuntimeMark
+                initialPair={config.pair}
+                fallback={runtimeState?.lastPrice ?? market.mid}
+                initialSnapshot={initialLiveSnapshot}
+              />
             </div>
           </div>
 
           <section className="min-h-0 overflow-hidden p-3">
-            <ReactiveTerminalChart initialConfig={config} candles={candles} orders={chartOrders} className="h-full" />
+            <ReactiveTerminalChart
+              initialConfig={config}
+              candles={candles}
+              orders={chartOrders}
+              className="h-full"
+              initialSnapshot={initialLiveSnapshot}
+            />
           </section>
 
           <section className="min-h-0 border-t bg-muted/10">
             <LiveAccountStatePrefetch />
-            <Tabs defaultValue="overview" className="h-full gap-0">
+            <Tabs defaultValue="bots" className="h-full gap-0">
               <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
                 <TabsList variant="line" className="h-8 rounded-none p-0">
+                  <TabsTrigger value="bots">Active Bots</TabsTrigger>
                   <TabsTrigger value="overview">Overview</TabsTrigger>
                   <TabsTrigger value="positions">Positions</TabsTrigger>
                   <TabsTrigger value="open-orders">Open Orders</TabsTrigger>
@@ -143,6 +175,10 @@ export default async function GridTerminalPage({
                   </form>
                 ) : null}
               </div>
+
+              <TabsContent value="bots" className="min-h-0 flex-1 overflow-auto p-3">
+                <ReactiveTerminalBotsTable activeBotId={activeBot?.id} initialSnapshot={initialLiveSnapshot} />
+              </TabsContent>
 
               <TabsContent value="overview" className="min-h-0 flex-1 overflow-auto p-3">
                 {activeBotPerformance ? (
@@ -199,112 +235,19 @@ export default async function GridTerminalPage({
   );
 }
 
-function ChallengeTicker({ challenge }: { challenge: ProprChallengeSummary }) {
-  const toTarget = positiveDifference(challenge.profitTarget, challenge.realizedPnl);
-  const dailyLossUsed = lossUsed(challenge.dayStartEquity, challenge.equity);
-  const drawdownUsed = lossUsed(challenge.highWaterMark, challenge.equity);
-  const sourceLabel = challenge.source === "propr_live" ? "Live API" : "Fallback";
-
-  return (
-    <div className="border-b bg-amber-500/8 px-4 py-2">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-2 text-xs">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="rounded-sm bg-amber-400/20 px-2 py-1 text-[11px] font-semibold text-amber-200">
-            {challenge.label}
-          </span>
-          <span className="rounded-sm border border-primary/30 bg-primary/10 px-2 py-1 text-[11px] font-semibold text-primary">
-            {sourceLabel}
-          </span>
-        </div>
-        <TickerMetric label="Balance" value={`$${challenge.balance}`} />
-        <TickerMetric label="Equity" value={`$${challenge.equity}`} />
-        <TickerMetric label="Available" value={challenge.availableBalance ? `$${challenge.availableBalance}` : "n/a"} tone="up" />
-        <TickerMetric label="Drawdown Used" value={`$${drawdownUsed} / ${challenge.drawdownUsedPct}%`} />
-        <TickerMetric label="Daily Loss" value={`$${dailyLossUsed} / $${challenge.dailyLossLimit}`} />
-        <TickerMetric label="Profit Target" value={`${challenge.profitProgressPct}% / ${challenge.ruleSet.profitTargetPct}%`} tone="up" />
-        <TickerMetric label="To Target" value={`$${toTarget}`} tone="up" />
-        <ProgressChip label="Daily" value={challenge.dailyLossUsedPct} />
-        <ProgressChip label="DD" value={challenge.drawdownUsedPct} />
-      </div>
-    </div>
-  );
+function isTerminalActiveBot(bot: Bot): boolean {
+  return ["paper", "running", "live", "out_of_range", "paused"].includes(bot.status);
 }
 
-function TickerMetric({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone?: "up" | "down";
-}) {
-  return (
-    <div className="flex items-baseline gap-1.5 whitespace-nowrap">
-      <span className="text-muted-foreground">{label}</span>
-      <span className={["metric-mono font-semibold", tone === "up" ? "text-primary" : "", tone === "down" ? "text-destructive" : ""].join(" ")}>
-        {value}
-      </span>
-    </div>
-  );
-}
-
-function ProgressChip({ label, value }: { label: string; value: string }) {
-  const pct = Math.max(0, Math.min(100, Number(value) || 0));
-  const tone = pct >= 80 ? "bg-destructive" : pct >= 55 ? "bg-amber-400" : "bg-primary";
-
-  return (
-    <div className="flex min-w-[92px] items-center gap-2">
-      <span className="text-muted-foreground">{label}</span>
-      <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-        <span className={`block h-full ${tone}`} style={{ width: `${pct}%` }} />
-      </span>
-      <span className="metric-mono text-muted-foreground">{value}%</span>
-    </div>
-  );
-}
-
-function BotSwitcher({ bots, activeBotId }: { bots: Bot[]; activeBotId?: string }) {
-  if (!bots.length) return null;
-
-  return (
-    <div className="mt-3 flex min-w-0 items-center gap-2 border-t pt-3 text-xs">
-      <span className="shrink-0 text-muted-foreground">Bots</span>
-      <div className="flex min-w-0 gap-2 overflow-x-auto">
-        {bots.map((bot) => {
-          const active = bot.id === activeBotId;
-          return (
-            <Link
-              key={bot.id}
-              href={`/grid-terminal?botId=${encodeURIComponent(bot.id)}`}
-              prefetch={false}
-              className={[
-                "flex min-w-[190px] items-center justify-between gap-3 rounded-md border px-3 py-2 transition-colors",
-                active
-                  ? "border-primary/60 bg-primary/10 text-foreground"
-                  : "border-border bg-muted/20 text-muted-foreground hover:border-primary/40 hover:bg-muted/40 hover:text-foreground",
-              ].join(" ")}
-            >
-              <span className="min-w-0">
-                <span className="block truncate font-medium">{bot.name}</span>
-                <span className="mt-0.5 block metric-mono">
-                  {formatMarketSymbol(bot.config.pair)} / {bot.config.positionSide.toUpperCase()} / {bot.config.leverage}x
-                </span>
-              </span>
-              <span
-                className={[
-                  "shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium capitalize",
-                  active ? "border-primary/40 text-primary" : "border-border text-muted-foreground",
-                ].join(" ")}
-              >
-                {bot.status.replaceAll("_", " ")}
-              </span>
-            </Link>
-          );
-        })}
-      </div>
-    </div>
-  );
+async function loadLivePositions(): Promise<ExecutionPosition[]> {
+  try {
+    const adapter = new ProprExecutionAdapter();
+    const health = await adapter.health();
+    if (!health.ok) return [];
+    return mergeProprWsPositionSnapshots(await adapter.getPositions());
+  } catch {
+    return [];
+  }
 }
 
 function BotOverview({
@@ -438,27 +381,10 @@ function formatTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString("fr-FR", {
+    timeZone: "Europe/Paris",
     day: "2-digit",
     month: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
   });
-}
-
-function positiveDifference(target: string, current: string): string {
-  try {
-    const difference = decimal(target).minus(current);
-    return toDecimalString(difference.gt(0) ? difference : 0, 2);
-  } catch {
-    return "0";
-  }
-}
-
-function lossUsed(reference: string, current: string): string {
-  try {
-    const difference = decimal(reference).minus(current);
-    return toDecimalString(difference.gt(0) ? difference : 0, 2);
-  } catch {
-    return "0";
-  }
 }

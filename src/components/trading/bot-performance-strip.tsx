@@ -24,7 +24,13 @@ export function BotPerformanceStrip({
             {summary.bot.config.leverage}x
           </div>
         </div>
-        <BotMetric icon={DollarSign} label="Tracked PnL" value={`${signed(summary.trackedPnl)} USDC`} tone={tone(summary.trackedPnl)} />
+        <BotMetric
+          icon={DollarSign}
+          label="Tracked PnL"
+          value={`${signed(summary.trackedPnl)} USDC`}
+          detail={`gross ${signed(summary.realizedPnl)} / fees ${summary.fees}`}
+          tone={tone(summary.trackedPnl)}
+        />
         <BotMetric icon={Gauge} label="Return" value={`${signed(summary.trackedPnlPct)}%`} tone={tone(summary.trackedPnlPct)} />
         <BotMetric icon={Layers3} label="Orders" value={`${summary.openOrders} open`} detail={`${summary.filledOrders} filled`} />
         <BotMetric icon={BarChart3} label="Exposure" value={`${summary.exposure} USDC`} detail={`${summary.volume} volume`} />

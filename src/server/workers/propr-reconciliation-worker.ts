@@ -1,9 +1,30 @@
 import { pathToFileURL } from "node:url";
 
+import WebSocket from "ws";
+
 import { getSetting, listBots, listEvents, reconcileProprBot, setSetting } from "@/features/bots/repository";
+import { recordProprWsPositionEvent } from "@/features/propr/ws-position-cache";
+import { getEnv } from "@/lib/env";
 
 const PROPR_WORKER_HEARTBEAT_KEY = "propr_worker_heartbeat";
+const PROPR_WORKER_WS_STATUS_KEY = "propr_worker_ws_status";
 const PROPR_WORKER_STALE_MS = 30_000;
+const PROPR_WS_RECONNECT_MS = 5_000;
+const PROPR_WS_RECONCILE_DEBOUNCE_MS = 750;
+const PROPR_WS_ACTIONABLE_EVENTS = new Set([
+  "order.created",
+  "order.updated",
+  "order.cancelled",
+  "order.triggered",
+  "order.filled",
+  "order.partially_filled",
+  "position.opened",
+  "position.closed",
+  "position.liquidated",
+  "position.take_profit.hit",
+  "position.stop_loss.hit",
+  "trade.created",
+]);
 
 export interface ProprReconciliationSummary {
   scanned: number;
@@ -17,7 +38,9 @@ export interface ProprWorkerStatus {
   running: boolean;
   heartbeatAt?: string;
   heartbeatAgeMs?: number;
+  lastTrigger?: "interval" | "propr_ws";
   lastSummary?: ProprReconciliationSummary;
+  ws?: ProprWorkerWsStatus;
   lastSyncEvent?: {
     type: string;
     message: string;
@@ -29,6 +52,20 @@ export interface ProprWorkerStatus {
     message: string;
     createdAt: string;
   }>;
+}
+
+export interface ProprWorkerWsStatus {
+  enabled: boolean;
+  connected: boolean;
+  url?: string;
+  connectedAt?: string;
+  disconnectedAt?: string;
+  lastEventAt?: string;
+  lastEventType?: string;
+  reconnects: number;
+  triggeredSyncs: number;
+  lastError?: string;
+  updatedAt: string;
 }
 
 export async function runProprReconciliation(options: { botId?: string } = {}): Promise<ProprReconciliationSummary> {
@@ -61,11 +98,15 @@ export async function runProprReconciliation(options: { botId?: string } = {}): 
   return summary;
 }
 
-export function recordProprWorkerHeartbeat(summary: ProprReconciliationSummary) {
+export function recordProprWorkerHeartbeat(
+  summary: ProprReconciliationSummary,
+  trigger: "interval" | "propr_ws" = "interval",
+) {
   setSetting(
     PROPR_WORKER_HEARTBEAT_KEY,
     JSON.stringify({
       at: new Date().toISOString(),
+      trigger,
       summary,
     }),
   );
@@ -96,7 +137,9 @@ export function getProprWorkerStatus(): ProprWorkerStatus {
     running: heartbeatAgeMs !== undefined && heartbeatAgeMs <= PROPR_WORKER_STALE_MS,
     heartbeatAt,
     heartbeatAgeMs,
+    lastTrigger: heartbeat?.trigger,
     lastSummary: heartbeat?.summary,
+    ws: readWsStatus() ?? undefined,
     lastSyncEvent: lastSyncEvent
       ? {
           type: lastSyncEvent.type,
@@ -111,12 +154,39 @@ export function getProprWorkerStatus(): ProprWorkerStatus {
 
 async function runLoop() {
   const intervalMs = Number(process.env.PROPR_WORKER_INTERVAL_MS ?? "10000");
+  let syncInFlight: Promise<void> | null = null;
+  let wsSyncTimer: NodeJS.Timeout | null = null;
+
+  const runWorkerSync = async (trigger: "interval" | "propr_ws", eventType?: string) => {
+    if (syncInFlight) return syncInFlight;
+    syncInFlight = (async () => {
+      const summary = await runProprReconciliation();
+      recordProprWorkerHeartbeat(summary, trigger);
+      if (trigger === "propr_ws") {
+        patchWsStatus((previous) => ({
+          triggeredSyncs: previous.triggeredSyncs + 1,
+          lastEventType: eventType ?? previous.lastEventType,
+        }));
+      }
+      if (summary.scanned > 0 || summary.errors.length > 0) {
+        console.log(JSON.stringify({ at: new Date().toISOString(), trigger, eventType, ...summary }));
+      }
+    })().finally(() => {
+      syncInFlight = null;
+    });
+    return syncInFlight;
+  };
+
+  startProprWebSocketListener((eventType) => {
+    if (wsSyncTimer) clearTimeout(wsSyncTimer);
+    wsSyncTimer = setTimeout(() => {
+      wsSyncTimer = null;
+      void runWorkerSync("propr_ws", eventType);
+    }, PROPR_WS_RECONCILE_DEBOUNCE_MS);
+  });
+
   while (true) {
-    const summary = await runProprReconciliation();
-    recordProprWorkerHeartbeat(summary);
-    if (summary.scanned > 0 || summary.errors.length > 0) {
-      console.log(JSON.stringify({ at: new Date().toISOString(), ...summary }));
-    }
+    await runWorkerSync("interval");
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 }
@@ -128,13 +198,157 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   });
 }
 
-function readHeartbeat(): { at: string; summary?: ProprReconciliationSummary } | null {
+function startProprWebSocketListener(onActionableEvent: (eventType: string) => void) {
+  const env = getEnv();
+  if (!env.PROPR_API_KEY) {
+    patchWsStatus(() => ({
+      enabled: false,
+      connected: false,
+      url: env.PROPR_WS_URL,
+      lastError: `${env.PROPR_SELECTED_API_KEY_NAME} is missing.`,
+    }));
+    return;
+  }
+
+  let stopped = false;
+  let reconnectTimer: NodeJS.Timeout | null = null;
+  let socket: WebSocket | null = null;
+
+  const connect = () => {
+    if (stopped) return;
+    patchWsStatus((previous) => ({
+      enabled: true,
+      connected: false,
+      url: env.PROPR_WS_URL,
+      reconnects: previous.connectedAt ? previous.reconnects + 1 : previous.reconnects,
+      lastError: undefined,
+    }));
+
+    socket = new WebSocket(env.PROPR_WS_URL, {
+      headers: { "X-API-Key": env.PROPR_API_KEY },
+    });
+
+    socket.on("open", () => {
+      patchWsStatus(() => ({
+        enabled: true,
+        connected: true,
+        url: env.PROPR_WS_URL,
+        connectedAt: new Date().toISOString(),
+        disconnectedAt: undefined,
+        lastError: undefined,
+      }));
+    });
+
+    socket.on("message", (raw) => {
+      const now = new Date().toISOString();
+      try {
+        const message = JSON.parse(raw.toString()) as { type?: string; data?: unknown; timestamp?: number };
+        const eventType = message.type ?? "unknown";
+        recordProprWsPositionEvent(eventType, message.data, now);
+        patchWsStatus(() => ({
+          enabled: true,
+          connected: true,
+          lastEventAt: now,
+          lastEventType: eventType,
+          lastError: undefined,
+        }));
+        if (PROPR_WS_ACTIONABLE_EVENTS.has(eventType)) {
+          onActionableEvent(eventType);
+        }
+      } catch (error) {
+        patchWsStatus(() => ({
+          lastError: error instanceof Error ? error.message : "Invalid Propr WS message",
+        }));
+      }
+    });
+
+    socket.on("close", () => {
+      socket = null;
+      patchWsStatus(() => ({
+        connected: false,
+        disconnectedAt: new Date().toISOString(),
+      }));
+      if (!stopped) {
+        reconnectTimer = setTimeout(connect, PROPR_WS_RECONNECT_MS);
+      }
+    });
+
+    socket.on("error", (error) => {
+      patchWsStatus(() => ({
+        connected: false,
+        lastError: error instanceof Error ? error.message : "Propr WS error",
+      }));
+    });
+  };
+
+  connect();
+
+  process.once("SIGTERM", () => {
+    stopped = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    socket?.close();
+  });
+}
+
+function patchWsStatus(patch: (previous: ProprWorkerWsStatus) => Partial<ProprWorkerWsStatus>) {
+  const previous =
+    readWsStatus() ?? ({
+      enabled: false,
+      connected: false,
+      reconnects: 0,
+      triggeredSyncs: 0,
+      updatedAt: new Date().toISOString(),
+    } satisfies ProprWorkerWsStatus);
+  const next = {
+    ...previous,
+    ...patch(previous),
+    updatedAt: new Date().toISOString(),
+  };
+  setSetting(PROPR_WORKER_WS_STATUS_KEY, JSON.stringify(next));
+}
+
+function readWsStatus(): ProprWorkerWsStatus | null {
+  const setting = getSetting(PROPR_WORKER_WS_STATUS_KEY);
+  if (!setting) return null;
+
+  try {
+    const parsed = JSON.parse(setting.value) as Partial<ProprWorkerWsStatus>;
+    if (typeof parsed.connected !== "boolean") return null;
+    return {
+      enabled: Boolean(parsed.enabled),
+      connected: parsed.connected,
+      url: typeof parsed.url === "string" ? parsed.url : undefined,
+      connectedAt: typeof parsed.connectedAt === "string" ? parsed.connectedAt : undefined,
+      disconnectedAt: typeof parsed.disconnectedAt === "string" ? parsed.disconnectedAt : undefined,
+      lastEventAt: typeof parsed.lastEventAt === "string" ? parsed.lastEventAt : undefined,
+      lastEventType: typeof parsed.lastEventType === "string" ? parsed.lastEventType : undefined,
+      reconnects: Number(parsed.reconnects ?? 0),
+      triggeredSyncs: Number(parsed.triggeredSyncs ?? 0),
+      lastError: typeof parsed.lastError === "string" ? parsed.lastError : undefined,
+      updatedAt: typeof parsed.updatedAt === "string" ? parsed.updatedAt : setting.updatedAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readHeartbeat(): { at: string; trigger?: "interval" | "propr_ws"; summary?: ProprReconciliationSummary } | null {
   const setting = getSetting(PROPR_WORKER_HEARTBEAT_KEY);
   if (!setting) return null;
 
   try {
-    const parsed = JSON.parse(setting.value) as { at?: unknown; summary?: ProprReconciliationSummary };
-    return typeof parsed.at === "string" ? { at: parsed.at, summary: parsed.summary } : null;
+    const parsed = JSON.parse(setting.value) as {
+      at?: unknown;
+      trigger?: unknown;
+      summary?: ProprReconciliationSummary;
+    };
+    return typeof parsed.at === "string"
+      ? {
+          at: parsed.at,
+          trigger: parsed.trigger === "propr_ws" ? "propr_ws" : "interval",
+          summary: parsed.summary,
+        }
+      : null;
   } catch {
     return null;
   }

@@ -55,7 +55,7 @@ export function PnlBreakdownPanel({
 
   useEffect(() => {
     const timeout = window.setTimeout(() => void loadState(false), 0);
-    const interval = window.setInterval(() => void loadState(false), 8000);
+    const interval = window.setInterval(() => void loadState(false), 3000);
     return () => {
       window.clearTimeout(timeout);
       window.clearInterval(interval);

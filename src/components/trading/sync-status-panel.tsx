@@ -12,11 +12,24 @@ interface ProprWorkerStatus {
   running: boolean;
   heartbeatAt?: string;
   heartbeatAgeMs?: number;
+  lastTrigger?: "interval" | "propr_ws";
   lastSummary?: {
     scanned: number;
     reconciled: number;
     safetyStops: number;
     errors: Array<{ botId: string; message: string }>;
+  };
+  ws?: {
+    enabled: boolean;
+    connected: boolean;
+    connectedAt?: string;
+    disconnectedAt?: string;
+    lastEventAt?: string;
+    lastEventType?: string;
+    reconnects: number;
+    triggeredSyncs: number;
+    lastError?: string;
+    updatedAt: string;
   };
   lastSyncEvent?: {
     type: string;
@@ -60,8 +73,9 @@ export function SyncStatusPanel({
   }, [loadStatus]);
 
   const scanErrors = status?.lastSummary?.errors ?? [];
-  const errorCount = (status?.recentErrors.length ?? 0) + scanErrors.length;
-  const latestError = status?.recentErrors[0]?.message ?? scanErrors[0]?.message;
+  const wsError = status?.ws?.lastError;
+  const errorCount = (status?.recentErrors.length ?? 0) + scanErrors.length + (wsError ? 1 : 0);
+  const latestError = wsError ?? status?.recentErrors[0]?.message ?? scanErrors[0]?.message;
   const hasErrors = errorCount > 0;
 
   const refreshButton = (
@@ -83,6 +97,9 @@ export function SyncStatusPanel({
           <Badge variant={status?.running ? "default" : "destructive"}>
             {status?.running ? "Worker running" : "Worker stale"}
           </Badge>
+          <Badge variant={status?.ws?.connected ? "default" : status?.ws?.enabled ? "destructive" : "outline"}>
+            {status?.ws?.connected ? "Propr WS connected" : status?.ws?.enabled ? "Propr WS reconnecting" : "Propr WS off"}
+          </Badge>
           <Badge variant={hasErrors ? "destructive" : "outline"}>
             {hasErrors ? `${errorCount} errors` : "No recent errors"}
           </Badge>
@@ -93,6 +110,10 @@ export function SyncStatusPanel({
           <SyncMetric label="Bots checked" value={status?.lastSummary ? `${status.lastSummary.scanned}` : "none"} />
           <SyncMetric label="Synced bots" value={status?.lastSummary ? String(status.lastSummary.reconciled) : "0"} />
           <SyncMetric label="Safety stops" value={status?.lastSummary ? String(status.lastSummary.safetyStops) : "0"} />
+          <SyncMetric label="Last trigger" value={status?.lastTrigger === "propr_ws" ? "Propr WS" : "interval"} />
+          <SyncMetric label="Last Propr event" value={status?.ws?.lastEventType ?? "none"} />
+          <SyncMetric label="WS event syncs" value={status?.ws ? String(status.ws.triggeredSyncs) : "0"} />
+          <SyncMetric label="WS heartbeat" value={status?.ws?.lastEventAt ? relativeTime(status.ws.lastEventAt) : "none"} />
         </div>
 
         {status?.lastSyncEvent ? (

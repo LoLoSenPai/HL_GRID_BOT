@@ -1,4 +1,4 @@
-import { decimal, toDecimalString } from "@/domain/decimal";
+import { Decimal, decimal, toDecimalString } from "@/domain/decimal";
 import { autoOrderSizeUsd, generateGridLevels, reduceOnlyForGridSide } from "@/domain/grid";
 import type { GridConfig } from "@/domain/types";
 
@@ -9,6 +9,8 @@ export interface GridRiskEstimate {
   entryOrderCount: number;
   autoOrderSize: string;
   totalEntryNotional: string;
+  averageEntryPrice: string;
+  drawdownToStopPct: string;
   lossToStop: string;
   bufferedLossToStop: string;
   stopBuffer: string;
@@ -26,25 +28,26 @@ export function estimateGridRisk(
     const stopLoss = config.stopLoss ? decimal(config.stopLoss) : null;
     const takeProfit = config.takeProfit ? decimal(config.takeProfit) : null;
 
-    const totalEntryNotional = entryLevels.reduce(
+    const totalGridNotional = levels.reduce(
       (total, level) => total.plus(decimal(level.quantity).mul(level.price)),
       decimal(0),
     );
+    const totalGridQuantity = levels.reduce((total, level) => total.plus(level.quantity), decimal(0));
+    const averageEntryPrice = totalGridQuantity.gt(0) ? totalGridNotional.div(totalGridQuantity) : decimal(0);
+    const drawdownToStopPct =
+      stopLoss && averageEntryPrice.gt(0)
+      ? config.positionSide === "long"
+          ? averageEntryPrice.minus(stopLoss).div(averageEntryPrice).mul(100)
+          : stopLoss.minus(averageEntryPrice).div(averageEntryPrice).mul(100)
+        : decimal(0);
     const lossToStop = stopLoss
-      ? entryLevels.reduce((total, level) => {
-          const entry = decimal(level.price);
-          const quantity = decimal(level.quantity);
-          const unitLoss =
-            config.positionSide === "long" ? entry.minus(stopLoss) : stopLoss.minus(entry);
-          return unitLoss.gt(0) ? total.plus(quantity.mul(unitLoss)) : total;
-        }, decimal(0))
+      ? Decimal.max(drawdownToStopPct, 0).div(100).mul(totalGridNotional)
       : decimal(0);
     const rewardToTakeProfit = takeProfit
-      ? entryLevels.reduce((total, level) => {
+      ? levels.reduce((total, level) => {
           const entry = decimal(level.price);
           const quantity = decimal(level.quantity);
-          const unitReward =
-            config.positionSide === "long" ? takeProfit.minus(entry) : entry.minus(takeProfit);
+          const unitReward = config.positionSide === "long" ? takeProfit.minus(entry) : entry.minus(takeProfit);
           return unitReward.gt(0) ? total.plus(quantity.mul(unitReward)) : total;
         }, decimal(0))
       : decimal(0);
@@ -54,7 +57,9 @@ export function estimateGridRisk(
       referencePrice,
       entryOrderCount: entryLevels.length,
       autoOrderSize: autoOrderSizeUsd(config, referencePrice),
-      totalEntryNotional: toDecimalString(totalEntryNotional, 2),
+      totalEntryNotional: toDecimalString(totalGridNotional, 2),
+      averageEntryPrice: toDecimalString(averageEntryPrice, 8),
+      drawdownToStopPct: toDecimalString(Decimal.max(drawdownToStopPct, 0), 4),
       lossToStop: toDecimalString(lossToStop, 2),
       bufferedLossToStop: toDecimalString(lossToStop.plus(stopBuffer), 2),
       stopBuffer: toDecimalString(stopBuffer, 2),
@@ -66,6 +71,8 @@ export function estimateGridRisk(
       entryOrderCount: 0,
       autoOrderSize: "0",
       totalEntryNotional: "0",
+      averageEntryPrice: "0",
+      drawdownToStopPct: "0",
       lossToStop: "0",
       bufferedLossToStop: "0",
       stopBuffer: "0",

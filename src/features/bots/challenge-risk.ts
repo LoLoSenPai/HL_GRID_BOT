@@ -1,5 +1,6 @@
 import { decimal, toDecimalString } from "@/domain/decimal";
 import { estimateGridRisk } from "@/domain/grid-risk";
+import { estimatePerpGridSizing } from "@/domain/perp-grid-sizing";
 import type { Bot, GridConfig } from "@/domain/types";
 import type { ProprChallengeSummary } from "@/features/propr/challenge-summary";
 
@@ -27,6 +28,11 @@ export interface ChallengeRiskPreflight {
   hardBudget: string;
   remainingBudget: string;
   recommendedCapitalAllocation: string;
+  recommendedRiskSizedNotional: string;
+  recommendedGridOrders: number;
+  recommendedAverageGridPrice: string;
+  recommendedDrawdownToStopPct: string;
+  recommendedSpacingMinPct: string;
   recommendedBudgetUsePct: string;
   blockers: string[];
 }
@@ -41,6 +47,15 @@ export function buildChallengeRiskPreflight(input: {
 }): ChallengeRiskPreflight {
   const blockers: string[] = [];
   const candidateRisk = estimateGridRisk(input.config, input.markPrice);
+  const recommendedSizing = estimatePerpGridSizing({
+    totalCapital: input.challenge.startingBalance,
+    riskPct: "1",
+    positionSide: input.config.positionSide,
+    lowerPrice: input.config.lowerPrice,
+    upperPrice: input.config.upperPrice,
+    stopPrice: input.config.stopLoss,
+    leverage: input.config.leverage,
+  });
   const candidateWorstCase = safeDecimal(candidateRisk.bufferedLossToStop);
   const committedWorstCase = input.committedBots
     .filter(
@@ -109,7 +124,17 @@ export function buildChallengeRiskPreflight(input: {
     drawdownRemaining: toDecimalString(drawdownRemaining, 2),
     hardBudget: toDecimalString(hardBudget, 2),
     remainingBudget: toDecimalString(remainingBudget, 2),
-    recommendedCapitalAllocation: recommendedCapitalAllocation(input.config, candidateWorstCase, remainingBudget),
+    recommendedCapitalAllocation: recommendedCapitalAllocation(
+      input.config,
+      candidateWorstCase,
+      remainingBudget,
+      recommendedSizing.marginRequired,
+    ),
+    recommendedRiskSizedNotional: recommendedSizing.riskSizedNotional,
+    recommendedGridOrders: recommendedSizing.recommendedGridOrders,
+    recommendedAverageGridPrice: recommendedSizing.averageGridPrice,
+    recommendedDrawdownToStopPct: recommendedSizing.drawdownToStopPct,
+    recommendedSpacingMinPct: recommendedSizing.spacingMinPct,
     recommendedBudgetUsePct: toDecimalString(decimal(RECOMMENDED_BUDGET_USE).mul(100), 0),
     blockers,
   };
@@ -119,7 +144,11 @@ function recommendedCapitalAllocation(
   config: GridConfig,
   candidateWorstCase: ReturnType<typeof decimal>,
   remainingBudget: ReturnType<typeof decimal>,
+  riskFormulaMargin: string,
 ): string {
+  const formulaMargin = safeDecimal(riskFormulaMargin);
+  if (formulaMargin.gt(0)) return toDecimalString(formulaMargin, 2);
+
   const currentCapital = safeDecimal(config.capitalAllocation);
   if (!currentCapital.gt(0) || !candidateWorstCase.gt(0) || !remainingBudget.gt(0)) return "0";
   const targetBudget = remainingBudget.mul(RECOMMENDED_BUDGET_USE);

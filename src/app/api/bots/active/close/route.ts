@@ -1,16 +1,23 @@
 import { NextResponse } from "next/server";
 
-import { getBot, listBots, stopBot } from "@/features/bots/repository";
+import { closeBot, getBot, listBots } from "@/features/bots/repository";
 
 export async function POST(request: Request) {
   const requestedId = await readRequestedBotId(request);
   const active = requestedId
     ? getBot(requestedId)
     : listBots().find((bot) => ["paper", "running", "live", "out_of_range"].includes(bot.status));
-  if (!active) return NextResponse.json({ error: "No active bot to stop" }, { status: 404 });
+  if (!active) return NextResponse.json({ error: "No active bot to close" }, { status: 404 });
 
-  await stopBot(active.id);
-  return NextResponse.json({ ok: true, id: active.id });
+  try {
+    const summary = await closeBot(active.id, "Manual close from terminal");
+    return NextResponse.json({ ok: true, id: active.id, summary });
+  } catch (error) {
+    return NextResponse.json(
+      { error: error instanceof Error ? error.message : "Failed to close bot" },
+      { status: 400 },
+    );
+  }
 }
 
 async function readRequestedBotId(request: Request): Promise<string | undefined> {

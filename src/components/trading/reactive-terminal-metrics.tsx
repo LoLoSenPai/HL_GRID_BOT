@@ -4,24 +4,32 @@ import { formatMarketSymbol } from "@/domain/markets";
 import type { MarketSnapshot, MarketSymbol } from "@/domain/types";
 import type { ProprChallengeSummary } from "@/features/propr/challenge-summary";
 import { useTerminalStore } from "@/store/use-terminal-store";
+import { useHyperliquidLiveMarkets } from "@/components/trading/hyperliquid-live-price-feed";
+import { useTerminalLiveSnapshot, type TerminalLiveSnapshot } from "@/components/trading/terminal-live-feed";
 
 export function ReactiveTerminalMetrics({
   initialPair,
   markets,
   challenge,
+  initialSnapshot,
 }: {
   initialPair: MarketSymbol;
   markets: MarketSnapshot[];
   challenge: ProprChallengeSummary;
+  initialSnapshot: TerminalLiveSnapshot;
 }) {
   const selectedPair = useTerminalStore((state) => state.config.pair) ?? initialPair;
-  const market = markets.find((snapshot) => snapshot.asset === selectedPair) ?? {
+  const liveSnapshot = useTerminalLiveSnapshot(initialSnapshot);
+  const marketFeed = useHyperliquidLiveMarkets(liveSnapshot?.markets ?? markets);
+  const liveMarkets = marketFeed.markets;
+  const liveChallenge = liveSnapshot?.challenge ?? challenge;
+  const market = liveMarkets.find((snapshot) => snapshot.asset === selectedPair) ?? {
     asset: selectedPair,
     mid: "0",
     funding: "0",
     timestamp: 0,
   };
-  const challengePnl = formatSignedNumber(Number(challenge.realizedPnl) + Number(challenge.unrealizedPnl));
+  const challengePnl = formatSignedNumber(Number(liveChallenge.realizedPnl) + Number(liveChallenge.unrealizedPnl));
   const change24h = Number(market.change24hPct);
   const pnl = Number(challengePnl);
 
@@ -31,8 +39,9 @@ export function ReactiveTerminalMetrics({
       <TerminalMetric label="Price" value={market.mid} strong />
       <TerminalMetric label="24h" value={formatChange(market.change24hPct)} tone={Number.isFinite(change24h) ? (change24h >= 0 ? "up" : "down") : undefined} />
       <TerminalMetric label="Funding" value={formatFunding(market.funding)} />
-      <TerminalMetric label="Equity" value={challenge.equity} />
+      <TerminalMetric label="Equity" value={liveChallenge.equity} />
       <TerminalMetric label="PnL" value={challengePnl} tone={Number.isFinite(pnl) ? (pnl >= 0 ? "up" : "down") : undefined} />
+      <TerminalMetric label="Feed" value={marketFeed.connected ? "WS" : "REST"} tone={marketFeed.connected ? "up" : undefined} />
     </div>
   );
 }

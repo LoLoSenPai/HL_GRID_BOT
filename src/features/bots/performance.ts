@@ -25,7 +25,7 @@ export function getBotPerformance(bot: Bot): BotPerformanceSummary {
   const realizedPnl = fills.reduce((sum, fill) => sum.plus(fill.realizedPnl), decimal(0));
   const fees = fills.reduce((sum, fill) => sum.plus(fill.fee), decimal(0));
   const volume = fills.reduce((sum, fill) => sum.plus(decimal(fill.quantity).mul(fill.price)), decimal(0));
-  const trackedPnl = runtime?.pnl ? decimal(runtime.pnl) : realizedPnl;
+  const trackedPnl = realizedPnl.minus(fees);
   const capital = decimal(bot.config.capitalAllocation || "0");
   const trackedPnlPct = capital.gt(0) ? trackedPnl.div(capital).mul(100) : decimal(0);
   const openOrders = orders.filter((order) => order.status === "open").length;

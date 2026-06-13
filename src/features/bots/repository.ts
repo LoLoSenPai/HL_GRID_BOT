@@ -148,6 +148,21 @@ export interface ProprEmergencyStopSummary {
   checkedAt: string;
 }
 
+export interface CloseBotSummary {
+  ok: boolean;
+  botId: string;
+  reason: string;
+  cancelledOrders: number;
+  inventoryQuantity: string;
+  positionQuantity: string;
+  closeQuantity: string;
+  closeOrderId?: string;
+  closeOrderStatus?: ExecutionOrder["status"];
+  syncedFills: number;
+  errors: string[];
+  checkedAt: string;
+}
+
 export function bootstrapBots() {
   ensureDatabase();
   removeLegacySampleBots();
@@ -421,14 +436,18 @@ export async function startProprBot(id: string) {
   if (!health.ok) throw new Error(health.reason ?? "Propr adapter is not healthy.");
   await adapter.setLeverage(bot.config.pair, bot.config.leverage);
 
-  const entryLevels = generateGridLevels(bot.config, referencePrice).filter(
-    (level) => !reduceOnlyForGridSide(bot.config.positionSide, level.side),
-  );
+  const levels = generateGridLevels(bot.config, referencePrice);
+  const entryLevels = levels.filter((level) => !reduceOnlyForGridSide(bot.config.positionSide, level.side));
+  const reduceOnlyLevels = levels.filter((level) => reduceOnlyForGridSide(bot.config.positionSide, level.side));
   if (!entryLevels.length) {
     throw new Error("No entry grid levels are available at the current mark price.");
   }
+  if (!reduceOnlyLevels.length) {
+    throw new Error("No reduce-only grid levels are available at the current mark price.");
+  }
 
   const placedOrders: ExecutionOrder[] = [];
+  let initialInventoryOrder: ExecutionOrder | null = null;
   try {
     for (const level of entryLevels) {
       const order = await adapter.placeOrder({
@@ -446,9 +465,44 @@ export async function startProprBot(id: string) {
       });
       placedOrders.push(order);
     }
+
+    const initialInventoryQuantity = sumLevelQuantities(reduceOnlyLevels);
+    initialInventoryOrder = await adapter.placeOrder({
+      clientOrderId: ulid(),
+      botId: bot.id,
+      gridLevelId: `${bot.config.pair}-initial-${referencePrice}`,
+      asset: bot.config.pair,
+      side: bot.config.positionSide === "long" ? "buy" : "sell",
+      positionSide: bot.config.positionSide,
+      type: "market",
+      quantity: initialInventoryQuantity,
+      timeInForce: "IOC",
+      reduceOnly: false,
+    });
+    placedOrders.push(initialInventoryOrder);
+
+    for (const level of reduceOnlyLevels) {
+      const order = await adapter.placeOrder({
+        clientOrderId: ulid(),
+        botId: bot.id,
+        gridLevelId: level.id,
+        asset: bot.config.pair,
+        side: level.side,
+        positionSide: bot.config.positionSide,
+        type: "limit",
+        quantity: level.quantity,
+        price: level.price,
+        timeInForce: "GTC",
+        reduceOnly: true,
+      });
+      placedOrders.push(order);
+    }
   } catch (error) {
     for (const order of placedOrders) {
       await adapter.cancelOrder(order.id).catch(() => null);
+    }
+    if (initialInventoryOrder) {
+      await closeInitialInventory(adapter, bot, initialInventoryOrder.quantity).catch(() => null);
     }
     updateBotStatus(bot.id, "error");
     addEvent({
@@ -456,7 +510,7 @@ export async function startProprBot(id: string) {
       type: "bot.propr_start_failed",
       severity: "error",
       message: `Propr bot deployment failed: ${error instanceof Error ? error.message : "unknown error"}`,
-      payload: { cancelledPlacedOrders: placedOrders.length },
+      payload: { cancelledPlacedOrders: placedOrders.length, initialInventoryClosed: Boolean(initialInventoryOrder) },
     });
     throw error;
   }
@@ -474,16 +528,34 @@ export async function startProprBot(id: string) {
         WHERE bot_id = ?
       `,
       )
-      .run(referencePrice, bot.config.capitalAllocation, "0", openOrderExposure(placedOrders), "0", now, bot.id);
+      .run(referencePrice, bot.config.capitalAllocation, "0", gridPlanNotional(levels), "0", now, bot.id);
     addEvent({
       botId: bot.id,
       type: "bot.propr_started",
       severity: "success",
-      message: `${bot.name} deployed on the active Propr challenge with ${placedOrders.length} entry orders.`,
-      payload: { referencePrice, orderCount: placedOrders.length },
+      message: `${bot.name} deployed with initial inventory and ${placedOrders.length - 1} grid ladder orders.`,
+      payload: {
+        referencePrice,
+        orderCount: placedOrders.length,
+        entryOrders: entryLevels.length,
+        reduceOnlyOrders: reduceOnlyLevels.length,
+        initialInventoryQuantity: initialInventoryOrder.quantity,
+      },
     });
   });
   tx();
+
+  const syncedFills = await syncTradesForPlacedOrders(bot, adapter, placedOrders);
+  if (syncedFills > 0) {
+    updateRuntimeFromAggregates(bot.id, referencePrice);
+    addEvent({
+      botId: bot.id,
+      type: "bot.propr_initial_fills_synced",
+      severity: "success",
+      message: `Initial Propr deployment fills synced: ${syncedFills} fills.`,
+      payload: { syncedFills },
+    });
+  }
 }
 
 export async function stopBot(id: string) {
@@ -518,6 +590,157 @@ export async function stopBot(id: string) {
   tx();
 }
 
+export async function closeBot(id: string, reason = "Manual close bot"): Promise<CloseBotSummary> {
+  const bot = getBot(id);
+  if (!bot) throw new Error("Bot not found.");
+
+  if (bot.config.mode !== "propr_live") {
+    await stopBot(id);
+    return {
+      ok: true,
+      botId: id,
+      reason,
+      cancelledOrders: 0,
+      inventoryQuantity: "0",
+      positionQuantity: "0",
+      closeQuantity: "0",
+      syncedFills: 0,
+      errors: [],
+      checkedAt: new Date().toISOString(),
+    };
+  }
+
+  const adapter = new ProprExecutionAdapter();
+  const health = await adapter.health();
+  if (!health.ok) {
+    const message = health.reason ?? "Propr adapter is not healthy.";
+    addEvent({
+      botId: id,
+      type: "bot.close_failed",
+      severity: "error",
+      message: `Bot close could not start: ${message}`,
+      payload: { reason },
+    });
+    throw new Error(message);
+  }
+
+  const checkedAt = new Date().toISOString();
+  const errors: string[] = [];
+  const cancelledOrderIds: string[] = [];
+  const openOrders = listOrders(id).filter((order) => order.status === "open");
+
+  for (const order of openOrders) {
+    try {
+      await adapter.cancelOrder(order.provider_order_id ?? order.id);
+      cancelledOrderIds.push(order.id);
+    } catch (error) {
+      errors.push(`cancel ${order.provider_order_id ?? order.id} failed: ${errorMessage(error)}`);
+    }
+  }
+
+  let positions: ExecutionPosition[] = [];
+  try {
+    positions = await adapter.getPositions(bot.config.pair);
+  } catch (error) {
+    errors.push(`position sync failed: ${errorMessage(error)}`);
+  }
+
+  const matchingPosition = positions.find(
+    (position) => position.asset === bot.config.pair && position.positionSide === bot.config.positionSide,
+  );
+  const positionQuantity = matchingPosition ? decimal(matchingPosition.quantity) : decimal(0);
+  const localInventoryQuantity = estimateBotInventoryQuantity(bot);
+  const sameSideActiveBots = listBots().filter(
+    (candidate) =>
+      candidate.id !== bot.id &&
+      isActiveProprRuntimeBot(candidate) &&
+      candidate.config.pair === bot.config.pair &&
+      candidate.config.positionSide === bot.config.positionSide,
+  );
+  const closeQuantity =
+    localInventoryQuantity.gt(0) || sameSideActiveBots.length > 0
+      ? DecimalMin(localInventoryQuantity, positionQuantity)
+      : positionQuantity;
+  let closeOrder: ExecutionOrder | null = null;
+  let syncedFills = 0;
+
+  if (closeQuantity.gt(0)) {
+    try {
+      closeOrder = await adapter.placeOrder({
+        clientOrderId: ulid(),
+        botId: bot.id,
+        gridLevelId: `${bot.config.pair}-manual-close-${checkedAt}`,
+        asset: bot.config.pair,
+        side: bot.config.positionSide === "long" ? "sell" : "buy",
+        positionSide: bot.config.positionSide,
+        type: "market",
+        quantity: toDecimalString(closeQuantity, 8),
+        timeInForce: "IOC",
+        reduceOnly: true,
+      });
+      insertOrder(closeOrder);
+      syncedFills = await syncTradesForPlacedOrders(bot, adapter, [closeOrder]);
+    } catch (error) {
+      errors.push(`close ${formatMarketSymbol(bot.config.pair)} ${bot.config.positionSide} failed: ${errorMessage(error)}`);
+    }
+  }
+
+  const ok = errors.length === 0;
+  const nextStatus: BotStatus = ok ? "stopped" : "error";
+  const tx = getSqlite().transaction(() => {
+    for (const orderId of cancelledOrderIds) {
+      getSqlite()
+        .prepare("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?")
+        .run(checkedAt, orderId);
+    }
+    if (closeOrder) insertOrder(closeOrder);
+    getSqlite().prepare("UPDATE bots SET status = ?, updated_at = ? WHERE id = ?").run(nextStatus, checkedAt, id);
+    getSqlite()
+      .prepare("UPDATE bot_runtime_state SET state = ?, exposure = ?, updated_at = ? WHERE bot_id = ?")
+      .run(nextStatus, ok ? "0" : getBotRuntimeState(id)?.exposure ?? "0", checkedAt, id);
+    addEvent({
+      botId: id,
+      type: ok ? "bot.closed" : "bot.close_failed",
+      severity: ok ? "warning" : "error",
+      message: ok
+        ? "Bot closed: local orders cancelled and bot inventory close attempted."
+        : "Bot close attempted with errors.",
+      payload: {
+        reason,
+        cancelledOrders: cancelledOrderIds.length,
+        inventoryQuantity: toDecimalString(localInventoryQuantity, 8),
+        positionQuantity: toDecimalString(positionQuantity, 8),
+        closeQuantity: toDecimalString(closeQuantity, 8),
+        closeOrderId: closeOrder?.providerOrderId ?? closeOrder?.id,
+        closeOrderStatus: closeOrder?.status,
+        sameSideActiveBots: sameSideActiveBots.length,
+        syncedFills,
+        errors,
+      },
+    });
+  });
+  tx();
+
+  if (!ok) {
+    throw new Error(errors[0] ?? "Bot close completed with errors.");
+  }
+
+  return {
+    ok,
+    botId: id,
+    reason,
+    cancelledOrders: cancelledOrderIds.length,
+    inventoryQuantity: toDecimalString(localInventoryQuantity, 8),
+    positionQuantity: toDecimalString(positionQuantity, 8),
+    closeQuantity: toDecimalString(closeQuantity, 8),
+    closeOrderId: closeOrder?.providerOrderId ?? closeOrder?.id,
+    closeOrderStatus: closeOrder?.status,
+    syncedFills,
+    errors,
+    checkedAt,
+  };
+}
+
 export async function triggerProprEmergencyStop(reason = "Manual kill switch"): Promise<ProprEmergencyStopSummary> {
   bootstrapBots();
   const adapter = new ProprExecutionAdapter();
@@ -550,7 +773,7 @@ export async function triggerProprEmergencyStop(reason = "Manual kill switch"): 
 export async function reconcileProprBot(id: string): Promise<{
   syncedOrders: number;
   insertedFills: number;
-  placedExitOrders: number;
+  placedGridOrders: number;
   safetyStopTriggered?: boolean;
 }> {
   const bot = getBot(id);
@@ -562,24 +785,31 @@ export async function reconcileProprBot(id: string): Promise<{
   const adapter = new ProprExecutionAdapter();
   const safetyStopTriggered = await enforceProprChallengeSafetyStop(bot, adapter);
   if (safetyStopTriggered) {
-    return { syncedOrders: 0, insertedFills: 0, placedExitOrders: 0, safetyStopTriggered: true };
+    return { syncedOrders: 0, insertedFills: 0, placedGridOrders: 0, safetyStopTriggered: true };
   }
 
-  const [openProviderOrders, trades] = await Promise.all([
+  const [openProviderOrders, trades, positions] = await Promise.all([
     adapter.getOpenOrders(bot.config.pair),
     adapter.getTrades(bot.config.pair),
+    adapter.getPositions(bot.config.pair),
   ]);
   const openProviderIds = new Set(openProviderOrders.map((order) => order.providerOrderId ?? order.id));
   const persistedOrders = listOrders(bot.id);
   const now = new Date().toISOString();
   let syncedOrders = 0;
   let insertedFills = 0;
-  let placedExitOrders = 0;
+  let placedGridOrders = 0;
 
-  for (const order of persistedOrders.filter((item) => item.status === "open")) {
+  for (const order of persistedOrders.filter((item) => !["cancelled", "rejected"].includes(item.status))) {
     const providerOrderId = order.provider_order_id ?? order.id;
     const providerTrades = trades.filter((trade) => trade.orderId === providerOrderId);
     if (openProviderIds.has(providerOrderId) || providerTrades.length === 0) continue;
+    const knownTradeRows = getSqlite()
+      .prepare("SELECT provider_trade_id FROM fills WHERE order_id = ?")
+      .all(order.id) as Array<{ provider_trade_id: string | null }>;
+    const knownTradeIds = new Set(knownTradeRows.map((row) => row.provider_trade_id).filter(Boolean));
+    const newProviderTrades = providerTrades.filter((trade) => !knownTradeIds.has(trade.providerTradeId ?? trade.id));
+    if (order.status === "filled" && newProviderTrades.length === 0) continue;
 
     const cumulativeQuantity = providerTrades.reduce((total, trade) => total.plus(trade.quantity), decimal(0));
     const notional = providerTrades.reduce((total, trade) => total.plus(decimal(trade.quantity).mul(trade.price)), decimal(0));
@@ -620,77 +850,88 @@ export async function reconcileProprBot(id: string): Promise<{
       insertedFills += result.changes;
     }
 
-    if (order.reduce_only === 0) {
-      const placedExitOrder = await placePairedExitIfMissing(bot, adapter, order, listOrders(bot.id));
-      if (placedExitOrder) placedExitOrders += 1;
-    }
+    const placedGridOrder = hasGridLevelIndex(order)
+      ? await placePairedGridOrderIfMissing(bot, adapter, order, listOrders(bot.id))
+      : null;
+    if (placedGridOrder) placedGridOrders += 1;
   }
 
-  const repairedExitOrders = await repairMissingExitOrders(bot, adapter);
-  placedExitOrders += repairedExitOrders;
+  const repairedGridOrders = await repairMissingGridOrders(bot, adapter);
+  placedGridOrders += repairedGridOrders;
 
-  const [market] = await getMarketSnapshots([bot.config.pair]);
-  updateRuntimeFromAggregates(bot.id, market?.mid ?? midpoint(bot.config));
+  const markPrice = positions.find((position) => position.asset === bot.config.pair)?.markPrice;
+  updateRuntimeFromAggregates(bot.id, markPrice ?? midpoint(bot.config));
   addEvent({
     botId: bot.id,
     type: "bot.propr_reconciled",
     severity: "success",
-    message: `Propr sync complete: ${syncedOrders} filled orders, ${insertedFills} new fills, ${placedExitOrders} exit orders.`,
-    payload: { syncedOrders, insertedFills, placedExitOrders },
+    message: `Propr sync complete: ${syncedOrders} filled orders, ${insertedFills} new fills, ${placedGridOrders} grid orders.`,
+    payload: { syncedOrders, insertedFills, placedGridOrders },
   });
 
-  return { syncedOrders, insertedFills, placedExitOrders };
+  return { syncedOrders, insertedFills, placedGridOrders };
 }
 
-async function repairMissingExitOrders(bot: Bot, adapter: ProprExecutionAdapter): Promise<number> {
-  let placedExitOrders = 0;
+async function repairMissingGridOrders(bot: Bot, adapter: ProprExecutionAdapter): Promise<number> {
+  let placedGridOrders = 0;
   let knownOrders = listOrders(bot.id);
-  const filledEntryOrders = knownOrders.filter((order) => order.status === "filled" && order.reduce_only === 0);
+  const filledGridOrders = knownOrders.filter((order) => order.status === "filled" && hasGridLevelIndex(order));
 
-  for (const filledEntry of filledEntryOrders) {
-    const placedExitOrder = await placePairedExitIfMissing(bot, adapter, filledEntry, knownOrders);
-    if (!placedExitOrder) continue;
-    placedExitOrders += 1;
+  for (const filledOrder of filledGridOrders) {
+    const placedGridOrder = await placePairedGridOrderIfMissing(bot, adapter, filledOrder, knownOrders);
+    if (!placedGridOrder) continue;
+    placedGridOrders += 1;
     knownOrders = listOrders(bot.id);
   }
 
-  return placedExitOrders;
+  return placedGridOrders;
 }
 
-async function placePairedExitIfMissing(
+async function placePairedGridOrderIfMissing(
   bot: Bot,
   adapter: ProprExecutionAdapter,
-  filledEntry: PersistedOrder,
+  filledOrder: PersistedOrder,
   knownOrders: PersistedOrder[],
 ): Promise<ExecutionOrder | null> {
-  const exitIntent = pairedOrder(bot.config, filledEntry);
-  const existingExit = knownOrders.some(
+  const nextIntent = pairedOrder(bot.config, filledOrder);
+  const existingGridOrder = knownOrders.some(
     (order) =>
-      order.id !== filledEntry.id &&
-      order.reduce_only === 1 &&
-      order.asset === exitIntent.asset &&
-      order.side === exitIntent.side &&
-      order.grid_level_id === exitIntent.gridLevelId &&
-      !["cancelled", "rejected"].includes(order.status),
+      order.id !== filledOrder.id &&
+      order.asset === nextIntent.asset &&
+      order.side === nextIntent.side &&
+      order.reduce_only === (nextIntent.reduceOnly ? 1 : 0) &&
+      order.grid_level_id === nextIntent.gridLevelId &&
+      blocksPairedGridReplacement(order, filledOrder),
   );
 
-  if (existingExit) return null;
+  if (existingGridOrder) return null;
 
-  const placedExitOrder = await adapter.placeOrder({
+  const placedGridOrder = await adapter.placeOrder({
     clientOrderId: ulid(),
     botId: bot.id,
-    gridLevelId: exitIntent.gridLevelId,
-    asset: exitIntent.asset,
-    side: exitIntent.side,
-    positionSide: exitIntent.positionSide,
-    type: exitIntent.type,
-    quantity: exitIntent.quantity,
-    price: exitIntent.price,
+    gridLevelId: nextIntent.gridLevelId,
+    asset: nextIntent.asset,
+    side: nextIntent.side,
+    positionSide: nextIntent.positionSide,
+    type: nextIntent.type,
+    quantity: nextIntent.quantity,
+    price: nextIntent.price,
     timeInForce: "GTC",
-    reduceOnly: true,
+    reduceOnly: nextIntent.reduceOnly,
   });
-  insertOrder(placedExitOrder);
-  return placedExitOrder;
+  insertOrder(placedGridOrder);
+  return placedGridOrder;
+}
+
+function blocksPairedGridReplacement(candidate: PersistedOrder, filledOrder: PersistedOrder): boolean {
+  if (["open", "pending", "partially_filled"].includes(candidate.status)) return true;
+  if (candidate.status !== "filled") return false;
+
+  const candidateCreatedAt = Date.parse(candidate.created_at);
+  const sourceFilledAt = Date.parse(filledOrder.updated_at);
+  if (!Number.isFinite(candidateCreatedAt) || !Number.isFinite(sourceFilledAt)) return true;
+
+  return candidateCreatedAt >= sourceFilledAt;
 }
 
 async function enforceProprChallengeSafetyStop(bot: Bot, adapter: ProprExecutionAdapter): Promise<boolean> {
@@ -1179,7 +1420,13 @@ function addEvent(event: {
 }
 
 function updateRuntimeFromAggregates(botId: string, lastPrice: string) {
-  const metrics = getRuntimeMetrics();
+  const bot = getBot(botId);
+  const orders = listOrders(botId);
+  const fills = listFills(botId);
+  const realizedPnl = fills.reduce((sum, fill) => sum.plus(fill.realizedPnl), decimal(0));
+  const exposure = orders
+    .filter((order) => order.status === "open")
+    .reduce((sum, order) => sum.plus(decimal(order.quantity).mul(order.price ?? lastPrice)), decimal(0));
   const now = new Date().toISOString();
   getSqlite()
     .prepare(
@@ -1188,7 +1435,15 @@ function updateRuntimeFromAggregates(botId: string, lastPrice: string) {
       WHERE bot_id = ?
     `,
     )
-    .run(lastPrice, metrics.equity, metrics.pnl, metrics.exposure, metrics.drawdownPct, now, botId);
+    .run(
+      lastPrice,
+      toDecimalString(decimal(bot?.config.capitalAllocation ?? 0).plus(realizedPnl), 2),
+      toDecimalString(realizedPnl, 2),
+      toDecimalString(exposure, 2),
+      "0",
+      now,
+      botId,
+    );
 }
 
 function reconcileSinglePaperBot(
@@ -1272,7 +1527,10 @@ function reconcileSinglePaperBot(
 function pairedOrder(config: GridConfig, filled: PersistedOrder): ExecutionOrder {
   const referencePrice = midpoint(config);
   const levels = generateGridLevels(config, referencePrice);
-  const currentIndex = Number(filled.grid_level_id?.split("-")[1] ?? "0");
+  const currentIndex = gridLevelIndex(filled);
+  if (currentIndex === null) {
+    throw new Error("Filled order is not linked to a grid level.");
+  }
   const nextIndex = filled.side === "buy" ? Math.min(currentIndex + 1, levels.length - 1) : Math.max(currentIndex - 1, 0);
   const level = levels[nextIndex];
   const side: OrderSide = filled.side === "buy" ? "sell" : "buy";
@@ -1297,14 +1555,121 @@ function pairedOrder(config: GridConfig, filled: PersistedOrder): ExecutionOrder
   };
 }
 
-function openOrderExposure(orders: ExecutionOrder[]): string {
+function hasGridLevelIndex(order: PersistedOrder): boolean {
+  return gridLevelIndex(order) !== null;
+}
+
+function gridLevelIndex(order: PersistedOrder): number | null {
+  const rawIndex = order.grid_level_id?.split("-")[1];
+  if (!rawIndex) return null;
+  const index = Number(rawIndex);
+  return Number.isInteger(index) && index >= 0 ? index : null;
+}
+
+function gridPlanNotional(levels: Array<{ quantity: string; price: string }>): string {
   return toDecimalString(
-    orders.reduce((total, order) => {
-      if (!order.price) return total;
-      return total.plus(decimal(order.quantity).mul(order.price));
-    }, decimal(0)),
+    levels.reduce((total, level) => total.plus(decimal(level.quantity).mul(level.price)), decimal(0)),
     2,
   );
+}
+
+function sumLevelQuantities(levels: Array<{ quantity: string }>): string {
+  return toDecimalString(levels.reduce((total, level) => total.plus(level.quantity), decimal(0)), 8);
+}
+
+async function closeInitialInventory(adapter: ProprExecutionAdapter, bot: Bot, quantity: string) {
+  await adapter.placeOrder({
+    clientOrderId: ulid(),
+    botId: bot.id,
+    asset: bot.config.pair,
+    side: bot.config.positionSide === "long" ? "sell" : "buy",
+    positionSide: bot.config.positionSide,
+    type: "market",
+    quantity,
+    timeInForce: "IOC",
+    reduceOnly: true,
+    closePosition: true,
+  });
+}
+
+function estimateBotInventoryQuantity(bot: Bot) {
+  const quantity = listOrders(bot.id).reduce((total, order) => {
+    if (order.asset !== bot.config.pair || order.position_side !== bot.config.positionSide) return total;
+    const executedQuantity = executedOrderQuantity(order);
+    if (executedQuantity.lte(0)) return total;
+    return order.reduce_only ? total.minus(executedQuantity) : total.plus(executedQuantity);
+  }, decimal(0));
+
+  return quantity.gt(0) ? quantity : decimal(0);
+}
+
+function executedOrderQuantity(order: PersistedOrder) {
+  const cumulativeQuantity = decimal(order.cumulative_quantity ?? "0");
+  if (cumulativeQuantity.gt(0)) return cumulativeQuantity;
+  if (order.status === "filled") return decimal(order.quantity);
+  return decimal(0);
+}
+
+function DecimalMin(a: ReturnType<typeof decimal>, b: ReturnType<typeof decimal>) {
+  return a.lte(b) ? a : b;
+}
+
+async function syncTradesForPlacedOrders(
+  bot: Bot,
+  adapter: ProprExecutionAdapter,
+  orders: ExecutionOrder[],
+): Promise<number> {
+  if (!orders.length) return 0;
+
+  const trades = await adapter.getTrades(bot.config.pair).catch(() => []);
+  const now = new Date().toISOString();
+  let insertedFills = 0;
+
+  for (const order of orders) {
+    const providerOrderId = order.providerOrderId ?? order.id;
+    const providerTrades = trades.filter((trade) => trade.orderId === providerOrderId);
+    if (!providerTrades.length) continue;
+
+    const cumulativeQuantity = providerTrades.reduce((total, trade) => total.plus(trade.quantity), decimal(0));
+    const notional = providerTrades.reduce((total, trade) => total.plus(decimal(trade.quantity).mul(trade.price)), decimal(0));
+    const averageFillPrice = cumulativeQuantity.gt(0) ? notional.div(cumulativeQuantity) : decimal(order.price ?? "0");
+
+    getSqlite()
+      .prepare(
+        `
+        UPDATE orders SET status = 'filled', cumulative_quantity = ?, average_fill_price = ?, updated_at = ?
+        WHERE id = ?
+      `,
+      )
+      .run(toDecimalString(cumulativeQuantity, 8), toDecimalString(averageFillPrice, 8), now, order.id);
+
+    for (const trade of providerTrades) {
+      const result = getSqlite()
+        .prepare(
+          `
+          INSERT OR IGNORE INTO fills (
+            id, bot_id, order_id, provider_trade_id, asset, side, quantity, price, fee, realized_pnl, executed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        )
+        .run(
+          trade.id,
+          bot.id,
+          order.id,
+          trade.providerTradeId ?? trade.id,
+          trade.asset,
+          trade.side,
+          trade.quantity,
+          trade.price,
+          trade.fee,
+          trade.realizedPnl,
+          trade.executedAt,
+        );
+      insertedFills += result.changes;
+    }
+  }
+
+  return insertedFills;
 }
 
 async function assertChallengeRiskBudget(botId: string, config: GridConfig) {

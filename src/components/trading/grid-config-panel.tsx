@@ -55,11 +55,17 @@ interface ChallengeRiskPreflight {
   drawdownRemaining: string;
   remainingBudget: string;
   recommendedCapitalAllocation: string;
+  recommendedRiskSizedNotional: string;
+  recommendedGridOrders: number;
+  recommendedAverageGridPrice: string;
+  recommendedDrawdownToStopPct: string;
+  recommendedSpacingMinPct: string;
   recommendedBudgetUsePct: string;
   blockers: string[];
 }
 
 interface ActiveChallengeBotSummary {
+  id: string;
   name: string;
   status: BotStatus;
   pair: MarketSymbol;
@@ -208,16 +214,25 @@ function GridPreviewSummary({ preview }: { preview: GridPreview }) {
 function ChallengeRiskPreflightPanel({
   preflight,
   currentCapitalAllocation,
+  currentGridCount,
   onApplySafeCapital,
+  onApplyRecommendedOrders,
 }: {
   preflight: ChallengeRiskPreflight | null;
   currentCapitalAllocation: string;
+  currentGridCount: number;
   onApplySafeCapital: () => void;
+  onApplyRecommendedOrders: () => void;
 }) {
   const canApplySafeCapital =
     preflight &&
     Number(preflight.recommendedCapitalAllocation) > 0 &&
     preflight.recommendedCapitalAllocation !== currentCapitalAllocation;
+  const canApplyRecommendedOrders =
+    preflight &&
+    Number.isFinite(preflight.recommendedGridOrders) &&
+    preflight.recommendedGridOrders > 0 &&
+    preflight.recommendedGridOrders !== currentGridCount;
 
   return (
     <div className="rounded-lg border bg-muted/20 p-3">
@@ -270,18 +285,43 @@ function ChallengeRiskPreflightPanel({
             ${preflight?.candidateLossToStop ?? "..."} + ${preflight?.candidateStopBuffer ?? "..."}
           </span>
         </div>
+        <div className="mt-1 border-t pt-2">
+          Risk model:{" "}
+          <span className="metric-mono text-foreground">
+            Pavg {preflight?.recommendedAverageGridPrice ?? "..."} / D{" "}
+            {preflight?.recommendedDrawdownToStopPct ?? "..."}%
+          </span>
+        </div>
+        <div className="mt-1">
+          Recommended grid:{" "}
+          <span className="metric-mono text-foreground">
+            ${preflight?.recommendedCapitalAllocation ?? "..."} margin / $
+            {preflight?.recommendedRiskSizedNotional ?? "..."} notional /{" "}
+            {preflight?.recommendedGridOrders ?? "..."} orders
+          </span>
+        </div>
+        <div className="mt-1">
+          Min spacing:{" "}
+          <span className="metric-mono text-foreground">{preflight?.recommendedSpacingMinPct ?? "..."}%</span>
+        </div>
         {preflight?.blockers[0] ? <div className="mt-1 text-destructive">{preflight.blockers[0]}</div> : null}
       </div>
 
-      {preflight?.status !== "pass" && canApplySafeCapital ? (
+      {canApplySafeCapital ? (
         <Button type="button" variant="outline" className="mt-3 w-full" onClick={onApplySafeCapital}>
-          Apply safe capital: {preflight.recommendedCapitalAllocation} USDC
+          Apply risk formula: {preflight.recommendedCapitalAllocation} USDC
         </Button>
       ) : null}
 
-      {preflight?.status !== "pass" && canApplySafeCapital ? (
+      {canApplyRecommendedOrders ? (
+        <Button type="button" variant="outline" className="mt-2 w-full" onClick={onApplyRecommendedOrders}>
+          Apply spacing formula: {preflight.recommendedGridOrders} orders
+        </Button>
+      ) : null}
+
+      {canApplySafeCapital ? (
         <div className="mt-2 text-xs text-muted-foreground">
-          Uses {preflight.recommendedBudgetUsePct}% of the remaining challenge risk budget.
+          Based on 1% accepted challenge risk and the configured stop beyond the grid.
         </div>
       ) : null}
     </div>
@@ -507,6 +547,9 @@ function DeployPreviewModal({
           <PreviewMetric label="Entry orders" value={preflight ? String(preflight.candidateEntryOrderCount) : "..."} />
           <PreviewMetric label="Order size" value={`$${preflight?.candidateAutoOrderSize ?? "..."}`} />
           <PreviewMetric label="Entry notional" value={`$${preflight?.candidateTotalEntryNotional ?? preview.totalNotional}`} />
+          <PreviewMetric label="Recommended margin" value={`$${preflight?.recommendedCapitalAllocation ?? "..."}`} />
+          <PreviewMetric label="Recommended orders" value={preflight ? String(preflight.recommendedGridOrders) : "..."} />
+          <PreviewMetric label="Min spacing" value={`${preflight?.recommendedSpacingMinPct ?? "..."}%`} />
           <PreviewMetric label="SL worst case" value={`$${preflight?.candidateWorstCase ?? "..."}`} tone="destructive" />
           <PreviewMetric label="Daily budget left" value={`$${preflight?.dailyRemaining ?? "..."}`} tone="primary" />
           <PreviewMetric label="Daily floor" value={`$${preflight?.dailyStopFloor ?? "..."}`} />
@@ -663,6 +706,10 @@ export function GridConfigPanel({
     if (!challengePreflight?.recommendedCapitalAllocation) return;
     patch({ capitalAllocation: challengePreflight.recommendedCapitalAllocation });
   };
+  const applyRecommendedOrders = () => {
+    if (!challengePreflight?.recommendedGridOrders) return;
+    patch({ gridCount: challengePreflight.recommendedGridOrders });
+  };
 
   const submitBotConfig = () => {
     setActionError(null);
@@ -691,12 +738,40 @@ export function GridConfigPanel({
   };
 
   const stopActiveBot = () => {
+    if (!activeBot) return;
     setActionError(null);
     startTransition(async () => {
-      const response = await fetch("/api/bots/active/stop", { method: "POST" });
+      const response = await fetch("/api/bots/active/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: activeBot.id }),
+      });
       const payload = (await response.json()) as { error?: string };
       if (!response.ok) {
         setActionError(payload.error ?? "Unable to stop bot.");
+        return;
+      }
+      router.refresh();
+    });
+  };
+
+  const closeActiveBot = () => {
+    if (!activeBot) return;
+    const confirmed = window.confirm(
+      `Close ${activeBot.name}? This cancels this bot's open orders and sends a reduce-only market order for the bot inventory.`,
+    );
+    if (!confirmed) return;
+
+    setActionError(null);
+    startTransition(async () => {
+      const response = await fetch("/api/bots/active/close", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: activeBot.id }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        setActionError(payload.error ?? "Unable to close bot.");
         return;
       }
       router.refresh();
@@ -809,7 +884,9 @@ export function GridConfigPanel({
             <ChallengeRiskPreflightPanel
               preflight={challengePreflight}
               currentCapitalAllocation={challengeConfig.capitalAllocation}
+              currentGridCount={challengeConfig.gridCount}
               onApplySafeCapital={applySafeCapital}
+              onApplyRecommendedOrders={applyRecommendedOrders}
             />
           </div>
         </Field>
@@ -842,19 +919,23 @@ export function GridConfigPanel({
             <AlertDescription>
               {activeBot
                 ? "A challenge bot is already active. The preview will re-check remaining risk before sending more entry orders."
-                : "This deploys the bot on the active Propr challenge. Entry orders are placed first; Sync Propr adds reduce-only exit orders after fills."}
+                : "This deploys the bot on the active Propr challenge. It opens the initial grid inventory and places both rebuy and reduce-only ladder orders."}
             </AlertDescription>
           </Alert>
         ) : null}
 
         <div className="grid grid-cols-2 gap-2">
-          <Button disabled={!canSubmit} onClick={() => setDeployPreviewOpen(true)}>
+          <Button className="col-span-2" disabled={!canSubmit} onClick={() => setDeployPreviewOpen(true)}>
             <Rocket data-icon="inline-start" />
             {pending ? "Working" : activeBot ? "Deploy Another" : "Deploy Bot"}
           </Button>
-          <Button variant="outline" disabled={pending} onClick={stopActiveBot}>
+          <Button variant="outline" disabled={pending || !activeBot} onClick={stopActiveBot}>
             <Square data-icon="inline-start" />
-            Stop
+            Cancel Orders
+          </Button>
+          <Button variant="destructive" disabled={pending || !activeBot} onClick={closeActiveBot}>
+            <X data-icon="inline-start" />
+            Close Bot
           </Button>
         </div>
       </CardContent>

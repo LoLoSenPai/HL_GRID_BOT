@@ -3,8 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 
 import { TerminalChart, type ChartOrder } from "@/components/charts/terminal-chart";
+import { useHyperliquidLiveMarkets } from "@/components/trading/hyperliquid-live-price-feed";
+import { useTerminalLiveSnapshot, type TerminalLiveSnapshot } from "@/components/trading/terminal-live-feed";
 import { formatMarketPair } from "@/domain/markets";
 import type { GridConfig, MarketSymbol } from "@/domain/types";
+import type { ExecutionPosition } from "@/features/execution/types";
 import type { Candle } from "@/features/market-data/types";
 import { useTerminalStore } from "@/store/use-terminal-store";
 
@@ -18,11 +21,13 @@ export function ReactiveTerminalChart({
   candles,
   orders = [],
   className = "",
+  initialSnapshot,
 }: {
   initialConfig: GridConfig;
   candles: Candle[];
   orders?: ChartOrder[];
   className?: string;
+  initialSnapshot: TerminalLiveSnapshot;
 }) {
   const initializedRef = useRef(false);
   const [initialized, setInitialized] = useState(false);
@@ -40,6 +45,14 @@ export function ReactiveTerminalChart({
   const cachedCandles = candleCache.get(activeConfig.pair);
   const chartReady = Boolean(cachedCandles?.length);
   const chartError = chartState.asset === activeConfig.pair ? chartState.error : undefined;
+  const liveSnapshot = useTerminalLiveSnapshot(initialSnapshot);
+  const marketFeed = useHyperliquidLiveMarkets(liveSnapshot?.markets ?? initialSnapshot.markets);
+  const livePrice = marketFeed.markets.find((market) => market.asset === activeConfig.pair)?.mid;
+  const livePosition = findMatchingPosition(
+    liveSnapshot?.livePositions ?? initialSnapshot.livePositions,
+    activeConfig.pair,
+    activeConfig.positionSide,
+  );
 
   useEffect(() => {
     if (initializedRef.current) return;
@@ -95,12 +108,31 @@ export function ReactiveTerminalChart({
   return (
     <div className={`relative h-full min-h-[260px] overflow-hidden rounded-md ${className}`}>
       {chartReady ? (
-        <TerminalChart config={activeConfig} candles={cachedCandles} orders={orders} />
+        <TerminalChart
+          config={activeConfig}
+          candles={cachedCandles}
+          orders={orders}
+          livePrice={livePrice}
+          position={
+            livePosition
+              ? {
+                  positionSide: livePosition.positionSide,
+                  quantity: livePosition.quantity,
+                  entryPrice: livePosition.entryPrice,
+                  unrealizedPnl: livePosition.unrealizedPnl,
+                }
+              : undefined
+          }
+        />
       ) : (
         <ChartLoadingPlaceholder asset={activeConfig.pair} error={chartError} />
       )}
     </div>
   );
+}
+
+function findMatchingPosition(positions: ExecutionPosition[], asset: MarketSymbol, positionSide: GridConfig["positionSide"]) {
+  return positions.find((position) => position.asset === asset && position.positionSide === positionSide);
 }
 
 function ChartLoadingPlaceholder({ asset, error }: { asset: MarketSymbol; error?: string }) {

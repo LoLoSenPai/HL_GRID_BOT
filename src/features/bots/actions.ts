@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 
 import {
+  closeBot,
   createBot,
   createLiveCandidateFromBot,
   deleteBot,
@@ -49,6 +50,12 @@ export async function resumeBotAction(formData: FormData) {
 export async function stopBotAction(formData: FormData) {
   const id = String(formData.get("id") ?? "");
   await stopBot(id);
+  revalidateApp();
+}
+
+export async function closeBotAction(formData: FormData) {
+  const id = String(formData.get("id") ?? "");
+  await closeBot(id, "Manual close from server action");
   revalidateApp();
 }
 

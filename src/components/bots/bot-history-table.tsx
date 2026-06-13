@@ -1,8 +1,7 @@
 import Link from "next/link";
-import { Copy, Pause, Pencil, Play, Square, SquareTerminal, Trash2 } from "lucide-react";
+import { Copy, SquareTerminal } from "lucide-react";
 
 import { Button, buttonVariants } from "@/components/ui/button";
-import { CloseBotActionButton } from "@/components/bots/close-bot-action-button";
 import {
   Table,
   TableBody,
@@ -12,21 +11,25 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { StatusBadge } from "@/components/trading/status-badge";
-import { Badge } from "@/components/ui/badge";
 import { formatMarketSymbol } from "@/domain/markets";
 import type { Bot } from "@/domain/types";
+import { duplicateBotAction } from "@/features/bots/actions";
 import { getBotPerformanceRows } from "@/features/bots/performance";
-import {
-  deleteBotAction,
-  duplicateBotAction,
-  pauseBotAction,
-  resumeBotAction,
-  stopBotAction,
-} from "@/features/bots/actions";
 import { cn } from "@/lib/utils";
 
-export function BotTable({ bots }: { bots: Bot[] }) {
+export function BotHistoryTable({ bots }: { bots: Bot[] }) {
   const rows = getBotPerformanceRows(bots);
+
+  if (!rows.length) {
+    return (
+      <div className="flex min-h-[220px] flex-col items-center justify-center rounded-md border border-dashed text-center">
+        <div className="text-sm font-medium">No bot history</div>
+        <div className="mt-1 max-w-sm text-xs text-muted-foreground">
+          Stopped or errored bots will appear here after tests.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="overflow-hidden rounded-lg border">
@@ -35,11 +38,12 @@ export function BotTable({ bots }: { bots: Bot[] }) {
           <TableRow>
             <TableHead>Bot</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead>PnL</TableHead>
+            <TableHead>Total PnL</TableHead>
             <TableHead>Return</TableHead>
             <TableHead>Orders</TableHead>
-            <TableHead>Exposure</TableHead>
-            <TableHead className="w-[300px] text-right">Actions</TableHead>
+            <TableHead>Volume</TableHead>
+            <TableHead className="text-right">Closed</TableHead>
+            <TableHead className="w-[120px] text-right">Actions</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -58,12 +62,7 @@ export function BotTable({ bots }: { bots: Bot[] }) {
                 </div>
               </TableCell>
               <TableCell>
-                <div className="flex flex-col items-start gap-1">
-                  <StatusBadge status={summary.bot.status} />
-                  <Badge variant="outline" className="capitalize">
-                    {summary.stateLabel}
-                  </Badge>
-                </div>
+                <StatusBadge status={summary.bot.status} />
               </TableCell>
               <TableCell>
                 <PnlValue value={summary.trackedPnl} suffix="USDC" />
@@ -76,45 +75,26 @@ export function BotTable({ bots }: { bots: Bot[] }) {
                 <div className="mt-1 text-xs text-muted-foreground">on {summary.bot.config.capitalAllocation} USDC</div>
               </TableCell>
               <TableCell className="metric-mono">
-                <div>{summary.openOrders} open</div>
-                <div className="mt-1 text-xs text-muted-foreground">{summary.filledOrders} filled</div>
+                <div>{summary.filledOrders} filled</div>
+                <div className="mt-1 text-xs text-muted-foreground">{summary.openOrders} open</div>
               </TableCell>
-              <TableCell className="metric-mono">
-                <div>{summary.exposure} USDC</div>
-                <div className="mt-1 text-xs text-muted-foreground">{summary.volume} volume</div>
-              </TableCell>
+              <TableCell className="metric-mono">{summary.volume} USDC</TableCell>
+              <TableCell className="text-right text-muted-foreground">{formatTime(summary.bot.updatedAt)}</TableCell>
               <TableCell>
                 <div className="flex justify-end gap-1">
                   <Link
                     href={`/grid-terminal?botId=${encodeURIComponent(summary.bot.id)}`}
                     className={cn(buttonVariants({ size: "icon-sm", variant: "ghost" }))}
-                    aria-label="Open bot in terminal"
+                    aria-label="Inspect bot"
                   >
                     <SquareTerminal />
                   </Link>
-                  <Link
-                    href={`/bots/${summary.bot.id}`}
-                    className={cn(buttonVariants({ size: "icon-sm", variant: "ghost" }))}
-                    aria-label="Edit bot"
-                  >
-                    <Pencil />
-                  </Link>
-                  <BotAction action={duplicateBotAction} id={summary.bot.id} label="Duplicate bot">
-                    <Copy />
-                  </BotAction>
-                  <BotAction action={resumeBotAction} id={summary.bot.id} label="Resume bot">
-                    <Play />
-                  </BotAction>
-                  <BotAction action={pauseBotAction} id={summary.bot.id} label="Pause bot">
-                    <Pause />
-                  </BotAction>
-                  <BotAction action={stopBotAction} id={summary.bot.id} label="Cancel bot orders">
-                    <Square />
-                  </BotAction>
-                  <CloseBotActionButton botId={summary.bot.id} botName={summary.bot.name} />
-                  <BotAction action={deleteBotAction} id={summary.bot.id} label="Delete bot">
-                    <Trash2 />
-                  </BotAction>
+                  <form action={duplicateBotAction}>
+                    <input type="hidden" name="id" value={summary.bot.id} />
+                    <Button size="icon-sm" variant="ghost" aria-label="Recreate bot" type="submit">
+                      <Copy />
+                    </Button>
+                  </form>
                 </div>
               </TableCell>
             </TableRow>
@@ -140,23 +120,13 @@ function signed(value: string) {
   return `${numeric >= 0 ? "+" : ""}${value}`;
 }
 
-function BotAction({
-  action,
-  id,
-  label,
-  children,
-}: {
-  action: (formData: FormData) => Promise<void>;
-  id: string;
-  label: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <form action={action}>
-      <input type="hidden" name="id" value={id} />
-      <Button size="icon-sm" variant="ghost" aria-label={label} type="submit">
-        {children}
-      </Button>
-    </form>
-  );
+function formatTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("fr-FR", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }

@@ -45,13 +45,10 @@ export function reduceOnlyForGridSide(positionSide: PositionSide, orderSide: Ord
 
 export function autoOrderSizeUsd(config: GridConfig, referencePrice: string): string {
   const prices = generateGridPrices(config);
-  const entryCount = prices.filter((price) => {
-    const side = sideForLevel(price, referencePrice);
-    return !reduceOnlyForGridSide(config.positionSide, side);
-  }).length;
-  if (entryCount === 0) return "0";
+  void referencePrice;
+  if (prices.length === 0) return "0";
 
-  return toDecimalString(decimal(config.capitalAllocation).mul(config.leverage).div(entryCount), 2);
+  return toDecimalString(decimal(config.capitalAllocation).mul(config.leverage).div(prices.length), 2);
 }
 
 export function generateGridLevels(

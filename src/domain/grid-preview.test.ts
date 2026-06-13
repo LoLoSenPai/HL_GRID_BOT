@@ -19,13 +19,13 @@ describe("grid preview", () => {
 
     expect(preview.lineCount).toBe(81);
     expect(preview.entryOrderCount).toBe(41);
-    expect(preview.autoOrderSize).toBe("60.98");
+    expect(preview.autoOrderSize).toBe("30.86");
     expect(preview.totalNotional).toBe("2500");
     expect(preview.spacingPct).toBe("0.244");
-    expect(preview.profitPerCycle).toBe("0.15");
-    expect(preview.worstCaseLoss).toBe("160.66");
-    expect(preview.lossToStop).toBe("146.05");
-    expect(preview.stopBuffer).toBe("14.61");
-    expect(preview.riskRewardRatio).toBe("2.42x");
+    expect(preview.profitPerCycle).toBe("0.08");
+    expect(preview.worstCaseLoss).toBe("281.31");
+    expect(preview.lossToStop).toBe("255.73");
+    expect(preview.stopBuffer).toBe("25.57");
+    expect(preview.riskRewardRatio).toBe("0.9x");
   });
 });

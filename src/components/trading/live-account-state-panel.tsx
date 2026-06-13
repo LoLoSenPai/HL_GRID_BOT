@@ -108,7 +108,7 @@ export function LiveAccountStatePanel({
 
   useEffect(() => {
     const timeout = window.setTimeout(() => void loadState(false), 0);
-    const interval = window.setInterval(() => void loadState(false), 8000);
+    const interval = window.setInterval(() => void loadState(false), 3000);
     return () => {
       window.clearTimeout(timeout);
       window.clearInterval(interval);
@@ -171,16 +171,18 @@ export function LiveAccountStatePanel({
         {view === "summary" || view === "positions" ? (
           <CompactTable
             title="Positions"
-            columns={["Asset", "Side", "Size", "Entry", "Mark", "uPnL", "Realized", "Margin", "Liq. Price"]}
+            columns={["Asset", "Side", "Size", "Position Value", "Entry", "Mark", "uPnL", "Net Realized", "Margin", "ROE", "Liq. Price"]}
             rows={scopedPositions.slice(0, view === "summary" ? 5 : 20).map((position) => [
               formatMarketSymbol(position.asset),
               `${position.positionSide} ${position.leverage}x`,
               position.quantity,
+              positionValue(position),
               position.entryPrice,
               position.markPrice,
               signed(position.unrealizedPnl),
-              signed(position.realizedPnl ?? "0"),
+              signed(netRealizedPnl(position)),
               position.marginUsed ?? "n/a",
+              liveReturnPct(position),
               position.liquidationPrice ?? "n/a",
             ])}
             empty="No open Propr positions."
@@ -214,7 +216,7 @@ export function LiveAccountStatePanel({
               position.quantity,
               signed(position.cumulativeFunding ?? "0"),
               signed(position.cumulativeTradingFees ?? "0"),
-              position.returnOnEquity ? `${position.returnOnEquity}%` : "n/a",
+              liveReturnPct(position),
             ])}
             empty="No funding data from Propr for this asset yet."
           />
@@ -322,6 +324,40 @@ function orderValue(quantity: string, price?: string): string {
   }
 }
 
+function positionValue(position: LiveAccountPosition): string {
+  try {
+    return `${toDecimalString(decimal(position.quantity).mul(position.markPrice), 2)} USDC`;
+  } catch {
+    return "n/a";
+  }
+}
+
+function netRealizedPnl(position: LiveAccountPosition): string {
+  try {
+    return toDecimalString(
+      decimal(position.realizedPnl ?? "0")
+        .plus(position.cumulativeFunding ?? "0")
+        .minus(position.cumulativeTradingFees ?? "0"),
+      4,
+    );
+  } catch {
+    return position.realizedPnl ?? "0";
+  }
+}
+
+function liveReturnPct(position: LiveAccountPosition): string {
+  try {
+    const value = position.returnOnEquity
+      ? decimal(position.returnOnEquity).mul(100)
+      : decimal(position.marginUsed ?? "0").gt(0)
+        ? decimal(position.unrealizedPnl).div(position.marginUsed ?? "0").mul(100)
+        : decimal(0);
+    return `${toDecimalString(value, 2)}%`;
+  } catch {
+    return "n/a";
+  }
+}
+
 function signed(value: string): string {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return value;
@@ -332,6 +368,7 @@ function formatTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString("fr-FR", {
+    timeZone: "Europe/Paris",
     day: "2-digit",
     month: "2-digit",
     hour: "2-digit",

@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 
 import { TerminalChart } from "@/components/charts/terminal-chart";
 import { ActivityFeed } from "@/components/activity/activity-feed";
+import { CloseBotActionButton } from "@/components/bots/close-bot-action-button";
 import { MetricCard } from "@/components/trading/metric-card";
 import { StatusBadge } from "@/components/trading/status-badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -70,8 +71,9 @@ export default async function BotDetailPage({ params }: { params: Promise<{ id: 
           ) : null}
           <form action={stopBotAction}>
             <input type="hidden" name="id" value={bot.id} />
-            <Button type="submit" variant="outline">Stop</Button>
+            <Button type="submit" variant="outline">Cancel Orders</Button>
           </form>
+          <CloseBotActionButton botId={bot.id} botName={bot.name} />
         </div>
       </div>
       {isLiveCandidate ? (

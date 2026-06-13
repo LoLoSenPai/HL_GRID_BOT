@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { calculateOrderQuantity, generateGridLevels, generateGridPrices, isOutOfRange } from "@/domain/grid";
+import { autoOrderSizeUsd, calculateOrderQuantity, generateGridLevels, generateGridPrices, isOutOfRange } from "@/domain/grid";
 import type { GridConfig } from "@/domain/types";
 
 const config: GridConfig = {
@@ -32,6 +32,10 @@ describe("grid math", () => {
 
   it("calculates asset quantity from USD order size without native float output", () => {
     expect(calculateOrderQuantity("BTC", "100", "100000")).toBe("0.001");
+  });
+
+  it("splits notional across all grid lines for perp inventory sizing", () => {
+    expect(autoOrderSizeUsd(config, "95000")).toBe("666.67");
   });
 
   it("detects prices outside the range", () => {
