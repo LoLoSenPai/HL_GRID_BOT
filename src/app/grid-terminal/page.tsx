@@ -12,6 +12,7 @@ import { ReactiveRuntimeMark } from "@/components/trading/reactive-runtime-mark"
 import { ReactiveTerminalMetrics } from "@/components/trading/reactive-terminal-metrics";
 import { StatusBadge } from "@/components/trading/status-badge";
 import { SyncStatusPanel } from "@/components/trading/sync-status-panel";
+import type { TerminalLiveFill, TerminalLiveOrder } from "@/components/trading/terminal-live-types";
 import { Button } from "@/components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -80,6 +81,8 @@ export default async function GridTerminalPage({
     challenge,
     bots: getBotPerformanceRows(terminalBots),
     livePositions,
+    orders: getTerminalLiveOrders(terminalBots),
+    fills: getTerminalLiveFills(terminalBots),
   };
   const market = markets.find((snapshot) => snapshot.asset === baseConfig.pair) ?? {
     asset: baseConfig.pair,
@@ -147,6 +150,7 @@ export default async function GridTerminalPage({
               orders={chartOrders}
               className="h-full"
               initialSnapshot={initialLiveSnapshot}
+              activeBotId={activeBot?.id}
             />
           </section>
 
@@ -248,6 +252,42 @@ async function loadLivePositions(): Promise<ExecutionPosition[]> {
   } catch {
     return [];
   }
+}
+
+function getTerminalLiveOrders(bots: Bot[]): TerminalLiveOrder[] {
+  return bots.flatMap((bot) =>
+    listOrders(bot.id)
+      .filter((order) => ["pending", "open", "partially_filled"].includes(order.status))
+      .slice(0, 140)
+      .map((order) => ({
+        id: order.id,
+        botId: bot.id,
+        asset: order.asset,
+        side: order.side,
+        status: order.status,
+        quantity: order.quantity,
+        price: order.price,
+        reduceOnly: Boolean(order.reduce_only),
+      })),
+  );
+}
+
+function getTerminalLiveFills(bots: Bot[]): TerminalLiveFill[] {
+  return bots.flatMap((bot) =>
+    listFills(bot.id)
+      .slice(0, 120)
+      .map((fill) => ({
+        id: fill.id,
+        botId: bot.id,
+        asset: fill.asset,
+        side: fill.side,
+        quantity: fill.quantity,
+        price: fill.price,
+        fee: fill.fee,
+        realizedPnl: fill.realizedPnl,
+        executedAt: fill.executedAt,
+      })),
+  );
 }
 
 function BotOverview({

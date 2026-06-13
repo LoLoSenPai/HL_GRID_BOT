@@ -5,11 +5,15 @@ import {
   CandlestickSeries,
   ColorType,
   createChart,
+  createSeriesMarkers,
   LineStyle,
   LineSeries,
   type IChartApi,
   type IPriceLine,
+  type ISeriesMarkersPluginApi,
   type ISeriesApi,
+  type SeriesMarker,
+  type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
 
@@ -27,6 +31,7 @@ interface ChartCandle {
 
 const INITIAL_VISIBLE_BARS = 140;
 const RIGHT_OFFSET_BARS = 10;
+const VISIBLE_ORDER_STATUSES = new Set(["pending", "open", "partially_filled"]);
 
 export interface ChartOrder {
   id: string;
@@ -44,27 +49,16 @@ export interface ChartPositionLine {
   unrealizedPnl: string;
 }
 
-function buildCandles(reference: number): ChartCandle[] {
-  const safeReference = Number.isFinite(reference) && reference > 0 ? reference : 1;
-  const now = Math.floor(Date.now() / 1000);
-  return Array.from({ length: 80 }, (_, index) => {
-    const time = (now - (80 - index) * 900) as UTCTimestamp;
-    const wave = Math.sin(index / 6) * safeReference * 0.012;
-    const drift = (index - 40) * safeReference * 0.00018;
-    const open = safeReference + wave + drift;
-    const close = open + Math.cos(index / 5) * safeReference * 0.004;
-    return {
-      time,
-      open,
-      high: Math.max(open, close) + safeReference * 0.006,
-      low: Math.min(open, close) - safeReference * 0.006,
-      close,
-    };
-  });
+export interface ChartFill {
+  id: string;
+  side: "buy" | "sell";
+  quantity: string;
+  price: string;
+  executedAt: string;
 }
 
-function normalizeCandles(candles: Candle[] | undefined, reference: number): ChartCandle[] {
-  const normalized =
+function normalizeCandles(candles: Candle[] | undefined): ChartCandle[] {
+  return (
     candles
       ?.map((candle) => ({
         time: candle.time as UTCTimestamp,
@@ -76,15 +70,15 @@ function normalizeCandles(candles: Candle[] | undefined, reference: number): Cha
       .filter((candle) =>
         [candle.time, candle.open, candle.high, candle.low, candle.close].every((value) => Number.isFinite(value)),
       )
-      .sort((a, b) => Number(a.time) - Number(b.time)) ?? [];
-
-  return normalized.length >= 2 ? normalized : buildCandles(reference);
+      .sort((a, b) => Number(a.time) - Number(b.time)) ?? []
+  );
 }
 
 export function TerminalChart({
   config,
   candles: inputCandles,
   orders = [],
+  fills = [],
   className = "",
   livePrice,
   position,
@@ -92,6 +86,7 @@ export function TerminalChart({
   config: GridConfig;
   candles?: Candle[];
   orders?: ChartOrder[];
+  fills?: ChartFill[];
   className?: string;
   livePrice?: string;
   position?: ChartPositionLine;
@@ -99,12 +94,13 @@ export function TerminalChart({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const fillMarkersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const gridSeriesRef = useRef<Array<ISeriesApi<"Line">>>([]);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const lastCandleRef = useRef<ChartCandle | null>(null);
   const visibleRangePairRef = useRef<GridConfig["pair"] | null>(null);
   const reference = resolveReference(config, inputCandles);
-  const candles = useMemo(() => normalizeCandles(inputCandles, reference), [inputCandles, reference]);
+  const candles = useMemo(() => normalizeCandles(inputCandles), [inputCandles]);
   const levels = useMemo(() => safeGenerateGridLevels(config, reference), [config, reference]);
 
   useEffect(() => {
@@ -152,6 +148,10 @@ export function TerminalChart({
       wickDownColor: "#f87171",
     });
     candleSeriesRef.current = candleSeries;
+    fillMarkersRef.current = createSeriesMarkers(candleSeries, [], {
+      autoScale: false,
+      zOrder: "top",
+    });
     chartRef.current = chart;
 
     const resize = () => {
@@ -168,6 +168,7 @@ export function TerminalChart({
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
+      fillMarkersRef.current = null;
       gridSeriesRef.current = [];
       priceLinesRef.current = [];
       lastCandleRef.current = null;
@@ -223,7 +224,7 @@ export function TerminalChart({
     priceLinesRef.current = [];
 
     const visibleOrders = orders
-      .filter((order) => order.status === "open" && Number.isFinite(Number(order.price)))
+      .filter((order) => VISIBLE_ORDER_STATUSES.has(order.status) && Number.isFinite(Number(order.price)))
       .sort((a, b) => Number(b.price) - Number(a.price))
       .slice(0, 60);
 
@@ -260,6 +261,12 @@ export function TerminalChart({
   }, [orders, position]);
 
   useEffect(() => {
+    const markerPlugin = fillMarkersRef.current;
+    if (!markerPlugin) return;
+    markerPlugin.setMarkers(buildFillMarkers(fills));
+  }, [fills]);
+
+  useEffect(() => {
     const series = candleSeriesRef.current;
     const lastCandle = lastCandleRef.current;
     const price = Number(livePrice);
@@ -287,6 +294,29 @@ export function TerminalChart({
   }, [livePrice]);
 
   return <div ref={containerRef} className={`h-full min-h-[260px] w-full ${className}`} />;
+}
+
+function buildFillMarkers(fills: ChartFill[]): SeriesMarker<Time>[] {
+  const markers: SeriesMarker<Time>[] = [];
+
+  for (const fill of fills) {
+    const timestamp = Date.parse(fill.executedAt);
+    const price = Number(fill.price);
+    if (!Number.isFinite(timestamp) || !Number.isFinite(price) || price <= 0) continue;
+
+    markers.push({
+      id: fill.id,
+      time: (Math.floor(timestamp / 1000 / 900) * 900) as UTCTimestamp,
+      position: "atPriceMiddle",
+      price,
+      shape: fill.side === "buy" ? "arrowUp" : "arrowDown",
+      color: fill.side === "buy" ? "#10b981" : "#ef4444",
+      text: `${fill.side} ${compactQuantity(fill.quantity)}`,
+      size: 1.2,
+    });
+  }
+
+  return markers.sort((a, b) => Number(a.time) - Number(b.time)).slice(-100);
 }
 
 function setInitialVisibleRange(chart: IChartApi, candleCount: number) {

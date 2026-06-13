@@ -2,18 +2,9 @@
 
 import { useEffect, useState } from "react";
 
-import type { MarketSnapshot } from "@/domain/types";
-import type { BotPerformanceSummary } from "@/features/bots/performance";
-import type { ExecutionPosition } from "@/features/execution/types";
-import type { ProprChallengeSummary } from "@/features/propr/challenge-summary";
+import type { TerminalLiveSnapshot } from "@/components/trading/terminal-live-types";
 
-export interface TerminalLiveSnapshot {
-  checkedAt: string;
-  markets: MarketSnapshot[];
-  challenge: ProprChallengeSummary;
-  bots: BotPerformanceSummary[];
-  livePositions: ExecutionPosition[];
-}
+export type { TerminalLiveFill, TerminalLiveOrder, TerminalLiveSnapshot } from "@/components/trading/terminal-live-types";
 
 const subscribers = new Set<(snapshot: TerminalLiveSnapshot) => void>();
 
@@ -50,7 +41,7 @@ export function useTerminalLiveSnapshot(initialSnapshot?: TerminalLiveSnapshot) 
 function startTerminalLiveFeed() {
   if (timer !== null) return;
   void loadTerminalLiveSnapshot();
-  timer = window.setInterval(() => void loadTerminalLiveSnapshot(), 5000);
+  timer = window.setInterval(() => void loadTerminalLiveSnapshot(), 3000);
 }
 
 function stopTerminalLiveFeed() {

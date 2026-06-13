@@ -2,9 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 
-import { TerminalChart, type ChartOrder } from "@/components/charts/terminal-chart";
+import { TerminalChart, type ChartFill, type ChartOrder } from "@/components/charts/terminal-chart";
 import { useHyperliquidLiveMarkets } from "@/components/trading/hyperliquid-live-price-feed";
-import { useTerminalLiveSnapshot, type TerminalLiveSnapshot } from "@/components/trading/terminal-live-feed";
+import {
+  useTerminalLiveSnapshot,
+  type TerminalLiveFill,
+  type TerminalLiveOrder,
+  type TerminalLiveSnapshot,
+} from "@/components/trading/terminal-live-feed";
 import { formatMarketPair } from "@/domain/markets";
 import type { GridConfig, MarketSymbol } from "@/domain/types";
 import type { ExecutionPosition } from "@/features/execution/types";
@@ -22,18 +27,20 @@ export function ReactiveTerminalChart({
   orders = [],
   className = "",
   initialSnapshot,
+  activeBotId,
 }: {
   initialConfig: GridConfig;
   candles: Candle[];
   orders?: ChartOrder[];
   className?: string;
   initialSnapshot: TerminalLiveSnapshot;
+  activeBotId?: string;
 }) {
   const initializedRef = useRef(false);
   const [initialized, setInitialized] = useState(false);
   const [candleCache, setCandleCache] = useState(() => {
     const initialCache = new Map<MarketSymbol, Candle[]>();
-    if (candles.length) initialCache.set(initialConfig.pair, candles);
+    if (hasUsableCandles(candles)) initialCache.set(initialConfig.pair, candles);
     return initialCache;
   });
   const [chartState, setChartState] = useState<ChartCandleState>({
@@ -43,11 +50,22 @@ export function ReactiveTerminalChart({
   const updateConfig = useTerminalStore((state) => state.updateConfig);
   const activeConfig = initialized ? config : initialConfig;
   const cachedCandles = candleCache.get(activeConfig.pair);
-  const chartReady = Boolean(cachedCandles?.length);
+  const chartReady = hasUsableCandles(cachedCandles);
   const chartError = chartState.asset === activeConfig.pair ? chartState.error : undefined;
   const liveSnapshot = useTerminalLiveSnapshot(initialSnapshot);
   const marketFeed = useHyperliquidLiveMarkets(liveSnapshot?.markets ?? initialSnapshot.markets);
   const livePrice = marketFeed.markets.find((market) => market.asset === activeConfig.pair)?.mid;
+  const chartOrders = resolveChartOrders({
+    activeBotId,
+    asset: activeConfig.pair,
+    fallback: orders,
+    liveOrders: liveSnapshot?.orders ?? initialSnapshot.orders ?? [],
+  });
+  const chartFills = resolveChartFills({
+    activeBotId,
+    asset: activeConfig.pair,
+    liveFills: liveSnapshot?.fills ?? initialSnapshot.fills ?? [],
+  });
   const livePosition = findMatchingPosition(
     liveSnapshot?.livePositions ?? initialSnapshot.livePositions,
     activeConfig.pair,
@@ -77,9 +95,9 @@ export function ReactiveTerminalChart({
         const payload = (await response.json()) as { data?: Candle[]; error?: string };
         if (!controller.signal.aborted) {
           const nextCandles = payload.data ?? [];
-          if (response.ok && nextCandles.length) {
+          if (response.ok && hasUsableCandles(nextCandles)) {
             setCandleCache((previous) => {
-              if (previous.get(asset)?.length) return previous;
+              if (hasUsableCandles(previous.get(asset))) return previous;
               const next = new Map(previous);
               next.set(asset, nextCandles);
               return next;
@@ -87,7 +105,7 @@ export function ReactiveTerminalChart({
           }
           setChartState({
             asset,
-            error: response.ok && nextCandles.length ? undefined : payload.error ?? "No candles available",
+            error: response.ok && hasUsableCandles(nextCandles) ? undefined : payload.error ?? "No candles available",
           });
         }
       } catch (error) {
@@ -111,7 +129,8 @@ export function ReactiveTerminalChart({
         <TerminalChart
           config={activeConfig}
           candles={cachedCandles}
-          orders={orders}
+          orders={chartOrders}
+          fills={chartFills}
           livePrice={livePrice}
           position={
             livePosition
@@ -129,6 +148,58 @@ export function ReactiveTerminalChart({
       )}
     </div>
   );
+}
+
+function resolveChartOrders({
+  activeBotId,
+  asset,
+  fallback,
+  liveOrders,
+}: {
+  activeBotId?: string;
+  asset: MarketSymbol;
+  fallback: ChartOrder[];
+  liveOrders: TerminalLiveOrder[];
+}): ChartOrder[] {
+  if (!activeBotId) return fallback;
+  return liveOrders
+    .filter((order) => order.botId === activeBotId && order.asset === asset)
+    .map((order) => ({
+      id: order.id,
+      side: order.side,
+      status: order.status,
+      quantity: order.quantity,
+      price: order.price,
+      reduceOnly: order.reduceOnly,
+    }));
+}
+
+function hasUsableCandles(candles?: Candle[]): boolean {
+  if (!candles || candles.length < 2) return false;
+  return candles.filter((candle) =>
+    [candle.time, candle.open, candle.high, candle.low, candle.close].every((value) => Number.isFinite(Number(value))),
+  ).length >= 2;
+}
+
+function resolveChartFills({
+  activeBotId,
+  asset,
+  liveFills,
+}: {
+  activeBotId?: string;
+  asset: MarketSymbol;
+  liveFills: TerminalLiveFill[];
+}): ChartFill[] {
+  if (!activeBotId) return [];
+  return liveFills
+    .filter((fill) => fill.botId === activeBotId && fill.asset === asset)
+    .map((fill) => ({
+      id: fill.id,
+      side: fill.side,
+      quantity: fill.quantity,
+      price: fill.price,
+      executedAt: fill.executedAt,
+    }));
 }
 
 function findMatchingPosition(positions: ExecutionPosition[], asset: MarketSymbol, positionSide: GridConfig["positionSide"]) {

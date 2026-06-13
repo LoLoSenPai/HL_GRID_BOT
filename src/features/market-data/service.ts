@@ -14,6 +14,11 @@ const MARKET_SOURCE = "hyperliquid_public_info";
 const FALLBACK_SOURCE = "sample_fallback";
 const DEFAULT_CANDLE_INTERVAL = "15m";
 const DEFAULT_CANDLE_LOOKBACK_HOURS = 72;
+const MARKET_SNAPSHOT_CACHE_MS = 20_000;
+const CANDLE_CACHE_MS = 5 * 60_000;
+
+const marketSnapshotCache = new Map<string, { data: MarketSnapshot[]; expiresAt: number }>();
+const candleCache = new Map<string, { data: Candle[]; expiresAt: number }>();
 
 export interface MarketSnapshotFeed {
   data: MarketSnapshot[];
@@ -30,13 +35,30 @@ export async function getMarketSnapshots(
 export async function getMarketSnapshotFeed(
   assets: readonly MarketSymbol[] = SUPPORTED_MARKETS,
 ): Promise<MarketSnapshotFeed> {
+  const cacheKey = marketSnapshotCacheKey(assets);
+  const cached = marketSnapshotCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return { data: cached.data, source: MARKET_SOURCE };
+  }
+
   try {
     const data = await loadMarketSnapshots(assets);
+    marketSnapshotCache.set(cacheKey, {
+      data,
+      expiresAt: Date.now() + MARKET_SNAPSHOT_CACHE_MS,
+    });
     persistMarketSnapshots(data);
     return { data, source: MARKET_SOURCE };
   } catch (error) {
     const message = errorMessage(error);
     logger.warn("market_data.snapshot_fallback", { error: message });
+    if (cached?.data.length) {
+      return {
+        data: cached.data,
+        source: MARKET_SOURCE,
+        error: message,
+      };
+    }
     return {
       data: fallbackMarketSnapshots(assets),
       source: FALLBACK_SOURCE,
@@ -51,17 +73,27 @@ export async function getCandlesForConfig(
   lookbackHours = DEFAULT_CANDLE_LOOKBACK_HOURS,
 ): Promise<Candle[]> {
   const provider = createMarketDataProvider();
+  const cacheKey = candleCacheKey(config.pair, interval, lookbackHours);
+  const cached = candleCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) return cached.data;
 
   try {
     const candles = await provider.getCandles(config.pair, interval, lookbackHours);
-    if (candles.length >= 2) return candles;
+    if (candles.length >= 2) {
+      candleCache.set(cacheKey, {
+        data: candles,
+        expiresAt: Date.now() + CANDLE_CACHE_MS,
+      });
+      return candles;
+    }
     throw new Error(`Hyperliquid returned ${candles.length} candles`);
   } catch (error) {
     logger.warn("market_data.candle_fallback", {
       asset: config.pair,
       error: errorMessage(error),
     });
-    return buildFallbackCandles(config);
+    if (cached?.data.length) return cached.data;
+    return [];
   }
 }
 
@@ -274,6 +306,14 @@ function persistMarketSnapshots(snapshots: MarketSnapshot[]) {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown market data error";
+}
+
+function marketSnapshotCacheKey(assets: readonly MarketSymbol[]): string {
+  return [...assets].sort().join("|");
+}
+
+function candleCacheKey(asset: MarketSymbol, interval: string, lookbackHours: number): string {
+  return `${asset}|${interval}|${lookbackHours}`;
 }
 
 function change24hPct(mid: string, previousDayPrice?: string): string | undefined {
