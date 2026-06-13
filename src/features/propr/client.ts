@@ -57,6 +57,11 @@ export interface ProprPosition {
   unrealizedPnl: string;
   realizedPnl: string;
   leverage: string;
+  liquidationPrice?: string;
+  marginUsed?: string;
+  cumulativeFunding?: string;
+  cumulativeTradingFees?: string;
+  returnOnEquity?: string;
 }
 
 export interface ProprTrade {
@@ -219,7 +224,7 @@ export class ProprClient {
       exchange: "hyperliquid",
       type: intent.type,
       side: intent.side,
-      positionSide: intent.positionSide,
+      positionSide: proprPositionSideForIntent(intent),
       productType: "perp",
       timeInForce: intent.timeInForce ?? (intent.type === "market" ? "IOC" : "GTC"),
       asset: intent.asset,
@@ -343,4 +348,9 @@ export class ProprClient {
 
 export function createProprClient(options?: ProprClientOptions) {
   return new ProprClient(options);
+}
+
+export function proprPositionSideForIntent(intent: OrderIntent): string {
+  if (!intent.reduceOnly) return intent.positionSide;
+  return intent.side === "buy" ? "long" : "short";
 }

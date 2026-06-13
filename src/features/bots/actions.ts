@@ -30,7 +30,7 @@ export async function startBotAction(formData: FormData) {
 }
 
 export async function createBotAction() {
-  createBot("New Local Sim Grid", defaultBotConfig);
+  createBot("New Challenge Grid", { ...defaultBotConfig, mode: "propr_live" });
   revalidateApp();
 }
 

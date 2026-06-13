@@ -61,6 +61,11 @@ export interface ExecutionPosition {
   unrealizedPnl: DecimalString;
   realizedPnl: DecimalString;
   leverage: DecimalString;
+  liquidationPrice?: DecimalString;
+  marginUsed?: DecimalString;
+  cumulativeFunding?: DecimalString;
+  cumulativeTradingFees?: DecimalString;
+  returnOnEquity?: DecimalString;
 }
 
 export interface ExecutionTrade {

@@ -16,18 +16,18 @@ export default function BotsPage() {
       <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-normal">Bots</h1>
-          <p className="text-sm text-muted-foreground">Create, edit, duplicate, pause, resume, stop and delete bots.</p>
+          <p className="text-sm text-muted-foreground">Track challenge bots, PnL, exposure, fills and operational actions.</p>
         </div>
         <form action={createBotAction}>
           <Button type="submit">
             <Plus data-icon="inline-start" />
-            Create
+            New bot
           </Button>
         </form>
       </div>
       <Card className="rounded-lg">
         <CardHeader>
-          <CardTitle className="text-sm">All bots</CardTitle>
+          <CardTitle className="text-sm">Bot performance</CardTitle>
         </CardHeader>
         <CardContent>
           <BotTable bots={bots} />

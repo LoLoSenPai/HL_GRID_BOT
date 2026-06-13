@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { AlertTriangle, Minus, Play, Plus, Rocket, ShieldCheck, Square, TrendingDown, TrendingUp, X, Zap } from "lucide-react";
+import { AlertTriangle, Minus, Plus, Rocket, ShieldCheck, Square, TrendingDown, TrendingUp, X, Zap } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -26,30 +26,15 @@ import { estimateGridPreview, type GridPreview } from "@/domain/grid-preview";
 import { maxProprLeverageForAsset } from "@/domain/propr-rules";
 import {
   type GridConfig,
+  type BotStatus,
   type MarketSnapshot,
   type MarketSymbol,
   type PositionSide,
-  type TradingMode,
 } from "@/domain/types";
 import { validateBotConfig } from "@/domain/risk";
 import type { ProprChallengeSummary } from "@/features/propr/challenge-summary";
 import { cn } from "@/lib/utils";
 import { useTerminalStore } from "@/store/use-terminal-store";
-
-const MODE_DETAILS: Record<TradingMode, { label: string; detail: string }> = {
-  mock: {
-    label: "Mock",
-    detail: "Local dev simulator. No Propr account, useful for UI and adapter checks.",
-  },
-  paper: {
-    label: "Local Sim",
-    detail: "Runs locally with Hyperliquid market data. No Propr orders.",
-  },
-  propr_live: {
-    label: "Propr Challenge",
-    detail: "Live API, active challenge account. Places initial entry grid orders.",
-  },
-};
 
 interface ChallengeRiskPreflight {
   status: "pass" | "blocked" | "invalid";
@@ -72,6 +57,13 @@ interface ChallengeRiskPreflight {
   recommendedCapitalAllocation: string;
   recommendedBudgetUsePct: string;
   blockers: string[];
+}
+
+interface ActiveChallengeBotSummary {
+  name: string;
+  status: BotStatus;
+  pair: MarketSymbol;
+  openOrders: number;
 }
 
 function clampLeverage(value: number, max: number) {
@@ -414,15 +406,55 @@ function RangeMarker({
   );
 }
 
-function ModeHint({ mode }: { mode: TradingMode }) {
-  const details = MODE_DETAILS[mode];
-
+function ChallengeAccountSummary({
+  challenge,
+  activeBot,
+}: {
+  challenge?: ProprChallengeSummary;
+  activeBot?: ActiveChallengeBotSummary | null;
+}) {
   return (
     <div className="rounded-lg border bg-muted/20 p-3">
-      <div className="text-sm font-medium">{details.label}</div>
-      <div className="text-xs text-muted-foreground">{details.detail}</div>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium">Propr challenge account</div>
+          <div className="mt-1 text-xs text-muted-foreground">
+            {challenge?.label ?? "Active challenge"} · {shortAccountId(challenge?.accountId)}
+          </div>
+        </div>
+        <span className="rounded-md border border-primary/30 bg-primary/10 px-2 py-1 text-xs font-medium text-primary">
+          Challenge
+        </span>
+      </div>
+      {activeBot ? (
+        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+          <div className="rounded-md border bg-background/50 p-2">
+            <div className="text-muted-foreground">Active bot</div>
+            <div className="truncate font-medium" title={activeBot.name}>
+              {activeBot.name}
+            </div>
+          </div>
+          <div className="rounded-md border bg-background/50 p-2">
+            <div className="text-muted-foreground">Open orders</div>
+            <div className="metric-mono font-semibold">
+              {activeBot.openOrders} {formatMarketSymbol(activeBot.pair)}
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 rounded-md border bg-background/50 p-2 text-xs text-muted-foreground">
+          No active challenge bot in the local runtime.
+        </div>
+      )}
     </div>
   );
+}
+
+function shortAccountId(accountId?: string | null) {
+  if (!accountId) return "not synced";
+  const parts = accountId.split(":");
+  const id = parts[parts.length - 1] ?? accountId;
+  return id.length > 10 ? `${id.slice(0, 6)}...${id.slice(-4)}` : id;
 }
 
 function DeployPreviewModal({
@@ -528,11 +560,15 @@ function formatCompactPrice(value: number): string {
 }
 
 export function GridConfigPanel({
+  initialConfig,
   marketSnapshots = [],
   challenge,
+  activeBot,
 }: {
+  initialConfig?: GridConfig;
   marketSnapshots?: MarketSnapshot[];
   challenge?: ProprChallengeSummary;
+  activeBot?: ActiveChallengeBotSummary | null;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -540,40 +576,46 @@ export function GridConfigPanel({
   const [challengePreflight, setChallengePreflight] = useState<ChallengeRiskPreflight | null>(null);
   const [deployPreviewOpen, setDeployPreviewOpen] = useState(false);
   const marketDefaultsAppliedRef = useRef(false);
+  const initialConfigKeyRef = useRef<string | null>(null);
   const config = useTerminalStore((state) => state.config);
-  const mode = useTerminalStore((state) => state.mode);
   const liveModeAcknowledged = useTerminalStore((state) => state.liveModeAcknowledged);
   const setSelectedMarket = useTerminalStore((state) => state.setSelectedMarket);
-  const setMode = useTerminalStore((state) => state.setMode);
   const updateConfig = useTerminalStore((state) => state.updateConfig);
   const acknowledgeLiveMode = useTerminalStore((state) => state.acknowledgeLiveMode);
-  const issues = validateBotConfig(config);
+  const challengeConfig = useMemo<GridConfig>(() => ({ ...config, mode: "propr_live" }), [config]);
+  const issues = validateBotConfig(challengeConfig);
   const blockingIssues = issues.filter((issue) => issue.severity === "error");
-  const liveNeedsAcknowledgement = mode === "propr_live" && !liveModeAcknowledged;
-  const liveCandidateMode = mode === "propr_live";
-  const maxLeverage = maxProprLeverageForAsset(config.pair);
+  const liveNeedsAcknowledgement = !liveModeAcknowledged;
+  const maxLeverage = maxProprLeverageForAsset(challengeConfig.pair);
   const currentMarket = useMemo(
-    () => marketSnapshots.find((market) => market.asset === config.pair),
-    [config.pair, marketSnapshots],
+    () => marketSnapshots.find((market) => market.asset === challengeConfig.pair),
+    [challengeConfig.pair, marketSnapshots],
   );
-  const preview = estimateGridPreview(config);
+  const preview = estimateGridPreview(challengeConfig);
   const livePreflightIssue =
-    mode === "propr_live" && challengePreflight?.status !== "pass"
+    challengePreflight?.status !== "pass"
       ? challengePreflight?.blockers[0] ?? "Challenge risk preflight is still syncing."
       : null;
 
-  const patch = (patchValue: Partial<GridConfig>) => updateConfig(patchValue);
+  const patch = (patchValue: Partial<GridConfig>) => updateConfig({ ...patchValue, mode: "propr_live" });
   const canSubmit = !blockingIssues.length && !liveNeedsAcknowledgement && !livePreflightIssue && !pending;
+
+  useEffect(() => {
+    if (!initialConfig) return;
+    const key = JSON.stringify(initialConfig);
+    if (initialConfigKeyRef.current === key) return;
+    initialConfigKeyRef.current = key;
+    marketDefaultsAppliedRef.current = true;
+    updateConfig({ ...initialConfig, mode: "propr_live" });
+  }, [initialConfig, updateConfig]);
 
   useEffect(() => {
     if (marketDefaultsAppliedRef.current || !currentMarket?.mid) return;
     marketDefaultsAppliedRef.current = true;
-    updateConfig(deriveDefaultGridConfigFromPrice(config, currentMarket.mid));
-  }, [config, currentMarket?.mid, updateConfig]);
+    updateConfig(deriveDefaultGridConfigFromPrice(challengeConfig, currentMarket.mid));
+  }, [challengeConfig, currentMarket?.mid, updateConfig]);
 
   useEffect(() => {
-    if (mode !== "propr_live") return;
-
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
       try {
@@ -581,7 +623,7 @@ export function GridConfigPanel({
         const response = await fetch("/api/bots/preflight", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ config }),
+          body: JSON.stringify({ config: challengeConfig }),
           cache: "no-store",
           signal: controller.signal,
         });
@@ -596,7 +638,7 @@ export function GridConfigPanel({
       window.clearTimeout(timer);
       controller.abort();
     };
-  }, [config, mode]);
+  }, [challengeConfig]);
 
   const selectMarket = (market: MarketSymbol) => {
     setSelectedMarket(market);
@@ -605,16 +647,16 @@ export function GridConfigPanel({
     updateConfig(
       deriveDefaultGridConfigFromPrice(
         {
-          ...config,
+          ...challengeConfig,
           pair: market,
-          leverage: clampLeverage(config.leverage, nextMaxLeverage),
+          leverage: clampLeverage(challengeConfig.leverage, nextMaxLeverage),
         },
         marketMid,
       ),
     );
   };
   const selectStrategy = (positionSide: PositionSide) => {
-    updateConfig(deriveGridConfigForPositionSide(config, positionSide));
+    updateConfig(deriveGridConfigForPositionSide(challengeConfig, positionSide));
   };
   const setLeverage = (value: number) => patch({ leverage: clampLeverage(value, maxLeverage) });
   const applySafeCapital = () => {
@@ -625,14 +667,13 @@ export function GridConfigPanel({
   const submitBotConfig = () => {
     setActionError(null);
     startTransition(async () => {
-      const modeName = mode === "propr_live" ? "Challenge" : mode === "mock" ? "Mock" : "Local Sim";
       const response = await fetch("/api/bots", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          name: `${formatMarketSymbol(config.pair)} ${config.positionSide.toUpperCase()} ${modeName} Grid`,
-          config,
-          confirmProprChallengeStart: mode === "propr_live" && liveModeAcknowledged,
+          name: `${formatMarketSymbol(challengeConfig.pair)} ${challengeConfig.positionSide.toUpperCase()} Challenge Grid`,
+          config: challengeConfig,
+          confirmProprChallengeStart: liveModeAcknowledged,
         }),
       });
       const payload = (await response.json()) as { error?: string };
@@ -673,9 +714,9 @@ export function GridConfigPanel({
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <Field label="Market">
-          <Select value={config.pair} onValueChange={(value) => selectMarket(value as MarketSymbol)}>
+          <Select value={challengeConfig.pair} onValueChange={(value) => selectMarket(value as MarketSymbol)}>
             <SelectTrigger size="sm" className="w-full">
-              <SelectValue>{formatMarketPair(config.pair)}</SelectValue>
+              <SelectValue>{formatMarketPair(challengeConfig.pair)}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
@@ -690,62 +731,47 @@ export function GridConfigPanel({
         </Field>
 
         <Field label="Strategy">
-          <StrategySelector value={config.positionSide} onChange={selectStrategy} />
+          <StrategySelector value={challengeConfig.positionSide} onChange={selectStrategy} />
         </Field>
 
-        <Field label="Mode">
-          <div className="flex flex-col gap-2">
-            <ToggleGroup
-              value={[mode]}
-              onValueChange={(value) => value[0] && setMode(value[0] as TradingMode)}
-              variant="outline"
-              size="sm"
-              spacing={1}
-            >
-              <ToggleGroupItem value="mock">Mock</ToggleGroupItem>
-              <ToggleGroupItem value="paper">Local Sim</ToggleGroupItem>
-              <ToggleGroupItem value="propr_live">Challenge</ToggleGroupItem>
-            </ToggleGroup>
-            <ModeHint mode={mode} />
-          </div>
-        </Field>
+        <ChallengeAccountSummary challenge={challenge} activeBot={activeBot} />
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Lower price">
-            <Input value={config.lowerPrice} onChange={(event) => patch({ lowerPrice: event.target.value })} />
+            <Input value={challengeConfig.lowerPrice} onChange={(event) => patch({ lowerPrice: event.target.value })} />
           </Field>
           <Field label="Upper price">
-            <Input value={config.upperPrice} onChange={(event) => patch({ upperPrice: event.target.value })} />
+            <Input value={challengeConfig.upperPrice} onChange={(event) => patch({ upperPrice: event.target.value })} />
           </Field>
           <Field label="Grid count">
             <Input
               type="number"
-              value={config.gridCount}
+              value={challengeConfig.gridCount}
               onChange={(event) => patch({ gridCount: Number(event.target.value) })}
             />
           </Field>
           <Field label="Daily stop %">
             <Input
-              value={config.challengeDailyLossStopPct}
+              value={challengeConfig.challengeDailyLossStopPct}
               onChange={(event) => patch({ challengeDailyLossStopPct: event.target.value })}
             />
           </Field>
           <Field label="Capital">
             <Input
-              value={config.capitalAllocation}
+              value={challengeConfig.capitalAllocation}
               onChange={(event) => patch({ capitalAllocation: event.target.value })}
             />
           </Field>
           <div className="col-span-2">
             <Field label="Leverage">
-              <LeverageControl max={maxLeverage} value={config.leverage} onChange={setLeverage} />
+              <LeverageControl max={maxLeverage} value={challengeConfig.leverage} onChange={setLeverage} />
             </Field>
           </div>
         </div>
 
         <Field label="Spacing">
           <ToggleGroup
-            value={[config.spacing]}
+            value={[challengeConfig.spacing]}
             onValueChange={(value) => value[0] && patch({ spacing: value[0] as GridConfig["spacing"] })}
             variant="outline"
             size="sm"
@@ -758,47 +784,43 @@ export function GridConfigPanel({
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Take profit">
-            <Input value={config.takeProfit ?? ""} onChange={(event) => patch({ takeProfit: event.target.value })} />
+            <Input value={challengeConfig.takeProfit ?? ""} onChange={(event) => patch({ takeProfit: event.target.value })} />
           </Field>
           <Field label="Stop loss">
-            <Input value={config.stopLoss ?? ""} onChange={(event) => patch({ stopLoss: event.target.value })} />
+            <Input value={challengeConfig.stopLoss ?? ""} onChange={(event) => patch({ stopLoss: event.target.value })} />
           </Field>
         </div>
 
         <div className="flex items-center justify-between rounded-lg border bg-muted/30 p-3">
           <div>
             <div className="text-sm font-medium">Auto pause out of range</div>
-            <div className="text-xs text-muted-foreground">Required before live execution.</div>
+            <div className="text-xs text-muted-foreground">Required before challenge execution.</div>
           </div>
           <Switch
-            checked={config.autoPauseOutOfRange}
+            checked={challengeConfig.autoPauseOutOfRange}
             onCheckedChange={(checked) => patch({ autoPauseOutOfRange: checked })}
           />
         </div>
 
         <Field label="Grid preview">
           <div className="flex flex-col gap-2">
-            <GridRangeVisual config={config} markPrice={currentMarket?.mid} />
+            <GridRangeVisual config={challengeConfig} markPrice={currentMarket?.mid} />
             <GridPreviewSummary preview={preview} />
-            {mode === "propr_live" ? (
-              <ChallengeRiskPreflightPanel
-                preflight={challengePreflight}
-                currentCapitalAllocation={config.capitalAllocation}
-                onApplySafeCapital={applySafeCapital}
-              />
-            ) : null}
+            <ChallengeRiskPreflightPanel
+              preflight={challengePreflight}
+              currentCapitalAllocation={challengeConfig.capitalAllocation}
+              onApplySafeCapital={applySafeCapital}
+            />
           </div>
         </Field>
 
-        {mode === "propr_live" ? (
-          <div className="flex items-center justify-between rounded-lg border border-amber-300/30 bg-amber-300/10 p-3">
-            <div>
-              <div className="text-sm font-medium text-amber-100">Deploy confirmation</div>
-              <div className="text-xs text-amber-100/70">Deploys this bot on the active challenge account.</div>
-            </div>
-            <Switch checked={liveModeAcknowledged} onCheckedChange={acknowledgeLiveMode} />
+        <div className="flex items-center justify-between rounded-lg border border-amber-300/30 bg-amber-300/10 p-3">
+          <div>
+            <div className="text-sm font-medium text-amber-100">Arm challenge deploy</div>
+            <div className="text-xs text-amber-100/70">Required before sending orders to the active Propr challenge.</div>
           </div>
-        ) : null}
+          <Switch checked={liveModeAcknowledged} onCheckedChange={acknowledgeLiveMode} />
+        </div>
 
         {blockingIssues.length || liveNeedsAcknowledgement || actionError ? (
           <Alert variant="destructive">
@@ -813,21 +835,22 @@ export function GridConfigPanel({
           </Alert>
         ) : null}
 
-        {liveCandidateMode && !liveNeedsAcknowledgement && !blockingIssues.length && !livePreflightIssue && !actionError ? (
+        {!liveNeedsAcknowledgement && !blockingIssues.length && !livePreflightIssue && !actionError ? (
           <Alert>
             <Rocket className="size-4" />
-            <AlertTitle>Ready to deploy</AlertTitle>
+            <AlertTitle>{activeBot ? "Ready to deploy another bot" : "Ready to deploy"}</AlertTitle>
             <AlertDescription>
-              This deploys the bot on the active Propr challenge. Entry orders are placed first; Sync Propr adds
-              reduce-only exit orders after fills.
+              {activeBot
+                ? "A challenge bot is already active. The preview will re-check remaining risk before sending more entry orders."
+                : "This deploys the bot on the active Propr challenge. Entry orders are placed first; Sync Propr adds reduce-only exit orders after fills."}
             </AlertDescription>
           </Alert>
         ) : null}
 
         <div className="grid grid-cols-2 gap-2">
-          <Button disabled={!canSubmit} onClick={liveCandidateMode ? () => setDeployPreviewOpen(true) : submitBotConfig}>
-            {liveCandidateMode ? <Rocket data-icon="inline-start" /> : <Play data-icon="inline-start" />}
-            {pending ? "Working" : liveCandidateMode ? "Deploy Bot" : `Start ${config.positionSide.toUpperCase()}`}
+          <Button disabled={!canSubmit} onClick={() => setDeployPreviewOpen(true)}>
+            <Rocket data-icon="inline-start" />
+            {pending ? "Working" : activeBot ? "Deploy Another" : "Deploy Bot"}
           </Button>
           <Button variant="outline" disabled={pending} onClick={stopActiveBot}>
             <Square data-icon="inline-start" />
@@ -838,7 +861,7 @@ export function GridConfigPanel({
     </Card>
     <DeployPreviewModal
       open={deployPreviewOpen}
-      config={config}
+      config={challengeConfig}
       preflight={challengePreflight}
       preview={preview}
       challenge={challenge}

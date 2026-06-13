@@ -1,0 +1,12 @@
+.git
+.next
+node_modules
+data
+coverage
+.vercel
+.env
+.env*
+*.log
+*.tsbuildinfo
+Dockerfile
+docker-compose*.yml

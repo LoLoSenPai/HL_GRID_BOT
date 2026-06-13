@@ -5,6 +5,7 @@ import {
   CandlestickSeries,
   ColorType,
   createChart,
+  LineStyle,
   LineSeries,
   type IChartApi,
   type UTCTimestamp,
@@ -20,6 +21,15 @@ interface ChartCandle {
   high: number;
   low: number;
   close: number;
+}
+
+export interface ChartOrder {
+  id: string;
+  side: "buy" | "sell";
+  status: string;
+  quantity: string;
+  price?: string | null;
+  reduceOnly: boolean;
 }
 
 function buildCandles(reference: number): ChartCandle[] {
@@ -59,7 +69,17 @@ function normalizeCandles(candles: Candle[] | undefined, reference: number): Cha
   return normalized.length >= 2 ? normalized : buildCandles(reference);
 }
 
-export function TerminalChart({ config, candles: inputCandles }: { config: GridConfig; candles?: Candle[] }) {
+export function TerminalChart({
+  config,
+  candles: inputCandles,
+  orders = [],
+  className = "",
+}: {
+  config: GridConfig;
+  candles?: Candle[];
+  orders?: ChartOrder[];
+  className?: string;
+}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const reference = resolveReference(config, inputCandles);
@@ -103,6 +123,9 @@ export function TerminalChart({ config, candles: inputCandles }: { config: GridC
       wickDownColor: "#f87171",
     });
     candleSeries.setData(candles);
+    const visibleOrders = orders
+      .filter((order) => order.status === "open" && Number.isFinite(Number(order.price)))
+      .slice(0, 24);
 
     for (const level of levels) {
       const line = chart.addSeries(LineSeries, {
@@ -115,6 +138,23 @@ export function TerminalChart({ config, candles: inputCandles }: { config: GridC
         { time: candles[0].time, value: Number(level.price) },
         { time: candles[candles.length - 1].time, value: Number(level.price) },
       ]);
+    }
+
+    for (const order of visibleOrders) {
+      const price = Number(order.price);
+      const color = order.reduceOnly
+        ? "rgba(168, 85, 247, 0.95)"
+        : order.side === "buy"
+          ? "rgba(59, 130, 246, 0.95)"
+          : "rgba(217, 119, 6, 0.95)";
+      candleSeries.createPriceLine({
+        price,
+        color,
+        lineWidth: order.reduceOnly ? 2 : 1,
+        lineStyle: LineStyle.Dotted,
+        axisLabelVisible: true,
+        title: orderLabel(order),
+      });
     }
 
     chart.timeScale().fitContent();
@@ -134,9 +174,21 @@ export function TerminalChart({ config, candles: inputCandles }: { config: GridC
       chart.remove();
       chartRef.current = null;
     };
-  }, [candles, levels]);
+  }, [candles, levels, orders]);
 
-  return <div ref={containerRef} className="h-[440px] min-h-[320px] w-full" />;
+  return <div ref={containerRef} className={`h-full min-h-[260px] w-full ${className}`} />;
+}
+
+function orderLabel(order: ChartOrder): string {
+  const action = order.reduceOnly ? "TP" : "Limit";
+  return `${action} ${order.side} ${compactQuantity(order.quantity)}`;
+}
+
+function compactQuantity(value: string): string {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return value;
+  if (numeric >= 1) return numeric.toFixed(2).replace(/\.?0+$/, "");
+  return numeric.toPrecision(4);
 }
 
 function resolveReference(config: GridConfig, inputCandles?: Candle[]): number {

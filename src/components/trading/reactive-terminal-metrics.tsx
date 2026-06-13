@@ -1,6 +1,5 @@
 "use client";
 
-import { MetricCard } from "@/components/trading/metric-card";
 import { formatMarketSymbol } from "@/domain/markets";
 import type { MarketSnapshot, MarketSymbol } from "@/domain/types";
 import type { ProprChallengeSummary } from "@/features/propr/challenge-summary";
@@ -23,15 +22,45 @@ export function ReactiveTerminalMetrics({
     timestamp: 0,
   };
   const challengePnl = formatSignedNumber(Number(challenge.realizedPnl) + Number(challenge.unrealizedPnl));
+  const change24h = Number(market.change24hPct);
+  const pnl = Number(challengePnl);
 
   return (
-    <div className="grid grid-cols-2 gap-2 md:grid-cols-6">
-      <MetricCard label="Pair" value={formatMarketSymbol(selectedPair)} />
-      <MetricCard label="Price" value={market.mid} />
-      <MetricCard label="24h" value={formatChange(market.change24hPct)} />
-      <MetricCard label="Funding" value={formatFunding(market.funding)} />
-      <MetricCard label="Equity" value={challenge.equity} detail={challenge.source === "propr_live" ? "Propr" : "Fallback"} />
-      <MetricCard label="PnL" value={challengePnl} detail="Challenge" />
+    <div className="flex min-w-0 flex-wrap items-center gap-x-5 gap-y-2 text-xs">
+      <TerminalMetric label="Pair" value={formatMarketSymbol(selectedPair)} strong />
+      <TerminalMetric label="Price" value={market.mid} strong />
+      <TerminalMetric label="24h" value={formatChange(market.change24hPct)} tone={Number.isFinite(change24h) ? (change24h >= 0 ? "up" : "down") : undefined} />
+      <TerminalMetric label="Funding" value={formatFunding(market.funding)} />
+      <TerminalMetric label="Equity" value={challenge.equity} />
+      <TerminalMetric label="PnL" value={challengePnl} tone={Number.isFinite(pnl) ? (pnl >= 0 ? "up" : "down") : undefined} />
+    </div>
+  );
+}
+
+function TerminalMetric({
+  label,
+  value,
+  strong,
+  tone,
+}: {
+  label: string;
+  value: string;
+  strong?: boolean;
+  tone?: "up" | "down";
+}) {
+  return (
+    <div className="min-w-[78px]">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div
+        className={[
+          "metric-mono mt-0.5 whitespace-nowrap",
+          strong ? "text-lg font-semibold" : "text-sm font-medium",
+          tone === "up" ? "text-primary" : "",
+          tone === "down" ? "text-destructive" : "",
+        ].join(" ")}
+      >
+        {value}
+      </div>
     </div>
   );
 }

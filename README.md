@@ -1,11 +1,14 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# HL Grid Bot
 
-## Getting Started
+Terminal de grid trading pour challenge Propr. En V1, le write path live passe par Propr; Hyperliquid sert de référence
+market data.
+
+## Configuration
 
 Configure the Propr execution profile in `.env`:
 
 ```bash
-PROPR_ACTIVE_ENV=beta # beta | live
+PROPR_ACTIVE_ENV=live # beta | live
 
 PROPR_BETA_API_KEY=
 PROPR_BETA_API_URL=
@@ -14,49 +17,102 @@ PROPR_BETA_WS_URL=
 PROPR_LIVE_API_KEY=
 PROPR_LIVE_API_URL=
 PROPR_LIVE_WS_URL=
+PROPR_LIVE_ACCOUNT_ID=urn:prp-account:...
+
+DATABASE_URL=file:./data/hl_grid_bot.sqlite
 ```
 
-Paper trading uses local SQLite and does not need Propr credentials. Propr credentials are server-only and must not be
+Local simulation uses SQLite and does not need Propr credentials. Propr credentials are server-only and must not be
 prefixed with `NEXT_PUBLIC_`.
 
-## Vercel demo mode
+## Local Test Mode With Docker
 
-The app can run on Vercel for demo purposes. When `VERCEL=1`, the SQLite file is redirected to `/tmp`, because the
-project filesystem is not persistent at runtime on Vercel.
+This is the recommended setup for the first real tests from a local PC. It runs:
 
-This is enough to show the dashboard, paper mode and Propr readiness screens to someone, but bot/order/fill state can be
-reset between serverless cold starts. Real persistence on Vercel should use an external database before enabling live
-execution.
+- `app`: Next.js UI and API on `http://localhost:3000`
+- `worker`: permanent Propr reconciliation and safety loop
+- `hl-grid-bot-data`: Docker volume containing the SQLite database
 
-First, run the development server:
+Start:
+
+```bash
+npm run docker:local:up
+```
+
+Watch logs:
+
+```bash
+npm run docker:local:logs
+```
+
+Stop:
+
+```bash
+npm run docker:local:down
+```
+
+Reset local Docker state, including bots/orders/fills:
+
+```bash
+docker compose -f docker-compose.local.yml down -v
+```
+
+Do not run another local `npm run start` on port `3000` at the same time as Docker.
+
+## Local Non-Docker Mode
+
+Run the web app:
+
+```bash
+npm run build
+npm run start -- --hostname 0.0.0.0
+```
+
+In another terminal, run the Propr worker:
+
+```bash
+npm run worker:propr
+```
+
+## Vercel Status
+
+The repo can be adapted for Vercel UI/demo hosting, but Vercel alone is not the correct runtime for real trading yet:
+
+- SQLite is local file storage; Vercel serverless filesystem is ephemeral and not shared.
+- `worker:propr` is a long-running process; Vercel Functions/Cron are request-based and duration-limited.
+
+For production-style deployment, use:
+
+- Vercel for the Next.js UI/API.
+- Managed Postgres/Turso/Supabase/Neon for persistence.
+- A VPS/Railway/Fly/Render worker running `npm run worker:propr` permanently against the same database.
+
+## Development
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Checks
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run typecheck
+npm run lint
+npm test
+npm run build
+```
 
-## Learn More
+## Current Safety Model
 
-To learn more about Next.js, take a look at the following resources:
+- Propr readiness must pass before challenge deployment.
+- Deploy opens a preview modal before sending entry orders.
+- The worker reconciles fills and adds reduce-only exits.
+- The safety stop closes exposure if the internal daily stop floor is reached.
+- The global kill switch cancels Propr orders and attempts reduce-only market closes.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Deployment Path
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+First test locally with Docker. Then migrate persistence away from SQLite before splitting UI to Vercel and worker to a
+VPS/service.

@@ -31,7 +31,11 @@ interface ProprWorkerStatus {
   }>;
 }
 
-export function SyncStatusPanel() {
+export function SyncStatusPanel({
+  variant = "card",
+}: {
+  variant?: "card" | "embedded";
+} = {}) {
   const [status, setStatus] = useState<ProprWorkerStatus | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -55,42 +59,39 @@ export function SyncStatusPanel() {
     };
   }, [loadStatus]);
 
-  const hasErrors = Boolean(status?.recentErrors.length);
+  const scanErrors = status?.lastSummary?.errors ?? [];
+  const errorCount = (status?.recentErrors.length ?? 0) + scanErrors.length;
+  const latestError = status?.recentErrors[0]?.message ?? scanErrors[0]?.message;
+  const hasErrors = errorCount > 0;
 
-  return (
-    <Card className="rounded-lg">
-      <CardHeader className="pb-3">
-        <div className="flex items-center justify-between gap-3">
-          <CardTitle className="flex items-center gap-2 text-sm">
-            <Activity className="size-4 text-primary" />
-            Worker / sync
-          </CardTitle>
-          <Button
-            type="button"
-            size="icon-sm"
-            variant="outline"
-            onClick={() => void loadStatus()}
-            disabled={loading}
-            aria-label="Refresh worker status"
-          >
-            <RefreshCw className={loading ? "animate-spin" : undefined} />
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
+  const refreshButton = (
+    <Button
+      type="button"
+      size="icon-sm"
+      variant="outline"
+      onClick={() => void loadStatus()}
+      disabled={loading}
+      aria-label="Refresh worker status"
+    >
+      <RefreshCw className={loading ? "animate-spin" : undefined} />
+    </Button>
+  );
+
+  const content = (
+    <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant={status?.running ? "default" : "destructive"}>
             {status?.running ? "Worker running" : "Worker stale"}
           </Badge>
           <Badge variant={hasErrors ? "destructive" : "outline"}>
-            {hasErrors ? `${status?.recentErrors.length} errors` : "No recent errors"}
+            {hasErrors ? `${errorCount} errors` : "No recent errors"}
           </Badge>
         </div>
 
         <div className="grid grid-cols-2 gap-2 text-xs">
-          <SyncMetric label="Heartbeat" value={status?.heartbeatAt ? relativeTime(status.heartbeatAt) : "none"} />
-          <SyncMetric label="Last scan" value={status?.lastSummary ? `${status.lastSummary.scanned} bots` : "none"} />
-          <SyncMetric label="Reconciled" value={status?.lastSummary ? String(status.lastSummary.reconciled) : "0"} />
+          <SyncMetric label="Worker heartbeat" value={status?.heartbeatAt ? relativeTime(status.heartbeatAt) : "none"} />
+          <SyncMetric label="Bots checked" value={status?.lastSummary ? `${status.lastSummary.scanned}` : "none"} />
+          <SyncMetric label="Synced bots" value={status?.lastSummary ? String(status.lastSummary.reconciled) : "0"} />
           <SyncMetric label="Safety stops" value={status?.lastSummary ? String(status.lastSummary.safetyStops) : "0"} />
         </div>
 
@@ -98,23 +99,52 @@ export function SyncStatusPanel() {
           <div className="rounded-md border bg-muted/20 p-2 text-xs text-muted-foreground">
             <div className="mb-1 flex items-center gap-1.5 text-foreground">
               <Clock className="size-3.5" />
-              Last Propr event
+              Last sync
             </div>
             <div>{status.lastSyncEvent.message}</div>
             <div className="mt-1 metric-mono">{relativeTime(status.lastSyncEvent.createdAt)}</div>
           </div>
         ) : null}
 
-        {status?.recentErrors[0] ? (
+        {latestError ? (
           <div className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
             <div className="mb-1 flex items-center gap-1.5 font-medium">
               <AlertTriangle className="size-3.5" />
               Latest error
             </div>
-            {status.recentErrors[0].message}
+            {latestError}
           </div>
         ) : null}
-      </CardContent>
+      </div>
+  );
+
+  if (variant === "embedded") {
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <Activity className="size-4 text-primary" />
+            Automation health
+          </div>
+          {refreshButton}
+        </div>
+        {content}
+      </div>
+    );
+  }
+
+  return (
+    <Card className="rounded-lg">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Activity className="size-4 text-primary" />
+            Automation health
+          </CardTitle>
+          {refreshButton}
+        </div>
+      </CardHeader>
+      <CardContent>{content}</CardContent>
     </Card>
   );
 }

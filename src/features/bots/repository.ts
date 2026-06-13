@@ -621,24 +621,13 @@ export async function reconcileProprBot(id: string): Promise<{
     }
 
     if (order.reduce_only === 0) {
-      const exitIntent = pairedOrder(bot.config, order);
-      const placedExitOrder = await adapter.placeOrder({
-        clientOrderId: ulid(),
-        botId: bot.id,
-        gridLevelId: exitIntent.gridLevelId,
-        asset: exitIntent.asset,
-        side: exitIntent.side,
-        positionSide: exitIntent.positionSide,
-        type: exitIntent.type,
-        quantity: exitIntent.quantity,
-        price: exitIntent.price,
-        timeInForce: "GTC",
-        reduceOnly: true,
-      });
-      insertOrder(placedExitOrder);
-      placedExitOrders += 1;
+      const placedExitOrder = await placePairedExitIfMissing(bot, adapter, order, listOrders(bot.id));
+      if (placedExitOrder) placedExitOrders += 1;
     }
   }
+
+  const repairedExitOrders = await repairMissingExitOrders(bot, adapter);
+  placedExitOrders += repairedExitOrders;
 
   const [market] = await getMarketSnapshots([bot.config.pair]);
   updateRuntimeFromAggregates(bot.id, market?.mid ?? midpoint(bot.config));
@@ -651,6 +640,57 @@ export async function reconcileProprBot(id: string): Promise<{
   });
 
   return { syncedOrders, insertedFills, placedExitOrders };
+}
+
+async function repairMissingExitOrders(bot: Bot, adapter: ProprExecutionAdapter): Promise<number> {
+  let placedExitOrders = 0;
+  let knownOrders = listOrders(bot.id);
+  const filledEntryOrders = knownOrders.filter((order) => order.status === "filled" && order.reduce_only === 0);
+
+  for (const filledEntry of filledEntryOrders) {
+    const placedExitOrder = await placePairedExitIfMissing(bot, adapter, filledEntry, knownOrders);
+    if (!placedExitOrder) continue;
+    placedExitOrders += 1;
+    knownOrders = listOrders(bot.id);
+  }
+
+  return placedExitOrders;
+}
+
+async function placePairedExitIfMissing(
+  bot: Bot,
+  adapter: ProprExecutionAdapter,
+  filledEntry: PersistedOrder,
+  knownOrders: PersistedOrder[],
+): Promise<ExecutionOrder | null> {
+  const exitIntent = pairedOrder(bot.config, filledEntry);
+  const existingExit = knownOrders.some(
+    (order) =>
+      order.id !== filledEntry.id &&
+      order.reduce_only === 1 &&
+      order.asset === exitIntent.asset &&
+      order.side === exitIntent.side &&
+      order.grid_level_id === exitIntent.gridLevelId &&
+      !["cancelled", "rejected"].includes(order.status),
+  );
+
+  if (existingExit) return null;
+
+  const placedExitOrder = await adapter.placeOrder({
+    clientOrderId: ulid(),
+    botId: bot.id,
+    gridLevelId: exitIntent.gridLevelId,
+    asset: exitIntent.asset,
+    side: exitIntent.side,
+    positionSide: exitIntent.positionSide,
+    type: exitIntent.type,
+    quantity: exitIntent.quantity,
+    price: exitIntent.price,
+    timeInForce: "GTC",
+    reduceOnly: true,
+  });
+  insertOrder(placedExitOrder);
+  return placedExitOrder;
 }
 
 async function enforceProprChallengeSafetyStop(bot: Bot, adapter: ProprExecutionAdapter): Promise<boolean> {

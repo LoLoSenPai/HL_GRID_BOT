@@ -109,6 +109,11 @@ export class ProprExecutionAdapter implements ExecutionAdapter {
       unrealizedPnl: position.unrealizedPnl,
       realizedPnl: position.realizedPnl,
       leverage: position.leverage,
+      liquidationPrice: position.liquidationPrice,
+      marginUsed: position.marginUsed,
+      cumulativeFunding: position.cumulativeFunding,
+      cumulativeTradingFees: position.cumulativeTradingFees,
+      returnOnEquity: position.returnOnEquity,
     }));
   }
 

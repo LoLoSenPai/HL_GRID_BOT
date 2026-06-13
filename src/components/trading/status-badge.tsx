@@ -5,7 +5,7 @@ const labels: Record<BotStatus, string> = {
   draft: "Draft",
   paper: "Local",
   running: "Running",
-  live: "Challenge",
+  live: "Active",
   paused: "Paused",
   out_of_range: "Out of range",
   error: "Error",

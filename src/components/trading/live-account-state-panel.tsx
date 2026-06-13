@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { decimal, toDecimalString } from "@/domain/decimal";
 import { formatMarketSymbol } from "@/domain/markets";
 import type { MarketSymbol, OrderSide, PositionSide } from "@/domain/types";
 
@@ -20,6 +21,8 @@ interface LiveAccountOrder {
   price?: string;
   status: string;
   reduceOnly: boolean;
+  cumulativeQuantity: string;
+  createdAt: string;
 }
 
 interface LiveAccountPosition {
@@ -30,7 +33,13 @@ interface LiveAccountPosition {
   entryPrice: string;
   markPrice: string;
   unrealizedPnl: string;
+  realizedPnl?: string;
   leverage: string;
+  liquidationPrice?: string;
+  marginUsed?: string;
+  cumulativeFunding?: string;
+  cumulativeTradingFees?: string;
+  returnOnEquity?: string;
 }
 
 interface LiveAccountTrade {
@@ -39,6 +48,7 @@ interface LiveAccountTrade {
   side: OrderSide;
   quantity: string;
   price: string;
+  fee?: string;
   realizedPnl: string;
   executedAt: string;
 }
@@ -52,16 +62,45 @@ interface LiveAccountState {
   trades: LiveAccountTrade[];
 }
 
-export function LiveAccountStatePanel() {
-  const [state, setState] = useState<LiveAccountState | null>(null);
+type LiveAccountView = "summary" | "positions" | "orders" | "trades" | "funding";
+
+let liveAccountStateCache: LiveAccountState | null = null;
+
+export function LiveAccountStatePrefetch() {
+  useEffect(() => {
+    if (liveAccountStateCache) return;
+
+    let active = true;
+    void fetchLiveAccountState().then((nextState) => {
+      if (!active) return;
+      liveAccountStateCache = nextState;
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return null;
+}
+
+export function LiveAccountStatePanel({
+  variant = "card",
+  view = "summary",
+  activeAsset,
+}: {
+  variant?: "card" | "embedded";
+  view?: LiveAccountView;
+  activeAsset?: MarketSymbol;
+} = {}) {
+  const [state, setState] = useState<LiveAccountState | null>(liveAccountStateCache);
   const [loading, setLoading] = useState(false);
 
   const loadState = useCallback(async (showLoading = true) => {
     if (showLoading) setLoading(true);
     try {
-      const response = await fetch("/api/propr/account-state", { cache: "no-store" });
-      const payload = (await response.json()) as { data?: LiveAccountState };
-      setState(payload.data ?? null);
+      liveAccountStateCache = await fetchLiveAccountState();
+      setState(liveAccountStateCache);
     } finally {
       if (showLoading) setLoading(false);
     }
@@ -76,32 +115,33 @@ export function LiveAccountStatePanel() {
     };
   }, [loadState]);
 
-  return (
-    <Card className="rounded-lg">
-      <CardHeader className="pb-3">
-        <div className="flex items-center justify-between gap-3">
-          <CardTitle className="flex items-center gap-2 text-sm">
-            <WalletCards className="size-4 text-primary" />
-            Live account state
-          </CardTitle>
-          <Button
-            type="button"
-            size="icon-sm"
-            variant="outline"
-            onClick={() => void loadState()}
-            disabled={loading}
-            aria-label="Refresh Propr account state"
-          >
-            <RefreshCw className={loading ? "animate-spin" : undefined} />
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
+  const refreshButton = (
+    <Button
+      type="button"
+      size="icon-sm"
+      variant="outline"
+      onClick={() => void loadState()}
+      disabled={loading}
+      aria-label="Refresh Propr account state"
+    >
+      <RefreshCw className={loading ? "animate-spin" : undefined} />
+    </Button>
+  );
+
+  const scopedOrders = (state?.openOrders ?? []).filter((order) => !activeAsset || order.asset === activeAsset);
+  const scopedPositions = (state?.positions ?? []).filter((position) => !activeAsset || position.asset === activeAsset);
+  const scopedTrades = (state?.trades ?? []).filter((trade) => !activeAsset || trade.asset === activeAsset);
+
+  const content = (
+    <div className="space-y-4">
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant={state?.ok ? "default" : "destructive"}>{state?.ok ? "Propr read OK" : "Propr read blocked"}</Badge>
+          <Badge variant={!state ? "outline" : state.ok ? "default" : "destructive"}>
+            {!state ? "Syncing Propr" : state.ok ? "Propr read OK" : "Propr read blocked"}
+          </Badge>
           <Badge variant="outline">{state ? relativeTime(state.checkedAt) : "syncing"}</Badge>
-          <Badge variant="outline">{state?.openOrders.length ?? 0} open orders</Badge>
-          <Badge variant="outline">{state?.positions.length ?? 0} positions</Badge>
+          <Badge variant="outline">{scopedOrders.length} open orders</Badge>
+          <Badge variant="outline">{scopedPositions.length} positions</Badge>
+          {activeAsset ? <Badge variant="outline">{formatMarketSymbol(activeAsset)}</Badge> : null}
         </div>
 
         {state?.reason ? (
@@ -110,44 +150,113 @@ export function LiveAccountStatePanel() {
           </div>
         ) : null}
 
-        <CompactTable
-          title="Open orders"
-          columns={["Asset", "Side", "Qty", "Price"]}
-          rows={(state?.openOrders ?? []).slice(0, 5).map((order) => [
-            formatMarketSymbol(order.asset),
-            `${order.side}${order.reduceOnly ? " RO" : ""}`,
-            order.quantity,
-            order.price ?? "market",
-          ])}
-          empty="No open Propr orders."
-        />
+        {view === "summary" || view === "orders" ? (
+          <CompactTable
+            title="Open orders"
+            columns={["Asset", "Direction", "Type", "Filled / Size", "Order Value", "Price", "Reduce Only", "Time"]}
+            rows={scopedOrders.slice(0, view === "summary" ? 5 : 20).map((order) => [
+              formatMarketSymbol(order.asset),
+              order.side,
+              order.type,
+              `${order.cumulativeQuantity ?? "0"} / ${order.quantity}`,
+              orderValue(order.quantity, order.price),
+              order.price ?? "market",
+              order.reduceOnly ? "Yes" : "No",
+              formatTime(order.createdAt),
+            ])}
+            empty="No open Propr orders."
+          />
+        ) : null}
 
-        <CompactTable
-          title="Positions"
-          columns={["Asset", "Side", "Qty", "uPnL"]}
-          rows={(state?.positions ?? []).slice(0, 5).map((position) => [
-            formatMarketSymbol(position.asset),
-            `${position.positionSide} ${position.leverage}x`,
-            position.quantity,
-            position.unrealizedPnl,
-          ])}
-          empty="No open Propr positions."
-        />
+        {view === "summary" || view === "positions" ? (
+          <CompactTable
+            title="Positions"
+            columns={["Asset", "Side", "Size", "Entry", "Mark", "uPnL", "Realized", "Margin", "Liq. Price"]}
+            rows={scopedPositions.slice(0, view === "summary" ? 5 : 20).map((position) => [
+              formatMarketSymbol(position.asset),
+              `${position.positionSide} ${position.leverage}x`,
+              position.quantity,
+              position.entryPrice,
+              position.markPrice,
+              signed(position.unrealizedPnl),
+              signed(position.realizedPnl ?? "0"),
+              position.marginUsed ?? "n/a",
+              position.liquidationPrice ?? "n/a",
+            ])}
+            empty="No open Propr positions."
+          />
+        ) : null}
 
-        <CompactTable
-          title="Recent trades"
-          columns={["Asset", "Side", "Qty", "Price"]}
-          rows={(state?.trades ?? []).slice(0, 5).map((trade) => [
-            formatMarketSymbol(trade.asset),
-            trade.side,
-            trade.quantity,
-            trade.price,
-          ])}
-          empty="No recent Propr trades."
-        />
-      </CardContent>
+        {view === "summary" || view === "trades" ? (
+          <CompactTable
+            title="Trade history"
+            columns={["Time", "Asset", "Side", "Qty", "Price", "Fee", "Realized PnL"]}
+            rows={scopedTrades.slice(0, view === "summary" ? 5 : 20).map((trade) => [
+              formatTime(trade.executedAt),
+              formatMarketSymbol(trade.asset),
+              trade.side,
+              trade.quantity,
+              trade.price,
+              trade.fee ?? "n/a",
+              signed(trade.realizedPnl),
+            ])}
+            empty="No recent Propr trades."
+          />
+        ) : null}
+
+        {view === "funding" ? (
+          <CompactTable
+            title="Funding and position fees"
+            columns={["Asset", "Side", "Size", "Funding", "Trading Fees", "ROE"]}
+            rows={scopedPositions.map((position) => [
+              formatMarketSymbol(position.asset),
+              position.positionSide,
+              position.quantity,
+              signed(position.cumulativeFunding ?? "0"),
+              signed(position.cumulativeTradingFees ?? "0"),
+              position.returnOnEquity ? `${position.returnOnEquity}%` : "n/a",
+            ])}
+            empty="No funding data from Propr for this asset yet."
+          />
+        ) : null}
+      </div>
+  );
+
+  if (variant === "embedded") {
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <WalletCards className="size-4 text-primary" />
+            Propr account
+          </div>
+          {refreshButton}
+        </div>
+        {content}
+      </div>
+    );
+  }
+
+  return (
+    <Card className="rounded-lg">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between gap-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <WalletCards className="size-4 text-primary" />
+            Propr account
+          </CardTitle>
+          {refreshButton}
+        </div>
+      </CardHeader>
+      <CardContent>{content}</CardContent>
     </Card>
   );
+}
+
+async function fetchLiveAccountState(): Promise<LiveAccountState | null> {
+  const response = await fetch("/api/propr/account-state", { cache: "no-store" });
+  const payload = (await response.json()) as { data?: LiveAccountState };
+  return payload.data ?? null;
 }
 
 function CompactTable({
@@ -202,4 +311,30 @@ function relativeTime(value: string): string {
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes}m ago`;
   return `${Math.round(minutes / 60)}h ago`;
+}
+
+function orderValue(quantity: string, price?: string): string {
+  if (!price) return "market";
+  try {
+    return `${toDecimalString(decimal(quantity).mul(price), 2)} USDC`;
+  } catch {
+    return "n/a";
+  }
+}
+
+function signed(value: string): string {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return value;
+  return `${numeric >= 0 ? "+" : ""}${value}`;
+}
+
+function formatTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString("fr-FR", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
