@@ -42,8 +42,9 @@ export function ReactiveTerminalBotsTable({
           {rows.map((summary) => {
             const active = summary.bot.id === activeBotId;
             const pnl = decimal(summary.trackedPnl);
-            const returnPct = decimal(summary.trackedPnlPct);
             const livePosition = findMatchingPosition(snapshot.livePositions, summary);
+            const liveReturnPct = livePosition ? livePositionReturnPct(livePosition) : null;
+            const returnPct = liveReturnPct ?? decimal(summary.trackedPnlPct);
 
             return (
               <TableRow key={summary.bot.id} className={active ? "bg-primary/10" : undefined}>
@@ -89,7 +90,9 @@ export function ReactiveTerminalBotsTable({
                 </TableCell>
                 <TableCell>
                   <SignedMetric value={toDecimalString(returnPct, 2)} suffix="%" />
-                  <div className="mt-1 text-xs text-muted-foreground">on {summary.bot.config.capitalAllocation} USDC</div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {livePosition ? liveReturnDetail(livePosition) : `on ${summary.bot.config.capitalAllocation} USDC`}
+                  </div>
                 </TableCell>
                 <TableCell className="metric-mono">
                   <div>{summary.openOrders} open</div>
@@ -120,6 +123,31 @@ function findMatchingPosition(
       position.asset === summary.bot.config.pair &&
       position.positionSide === summary.bot.config.positionSide,
   );
+}
+
+function livePositionReturnPct(position: ExecutionPosition): ReturnType<typeof decimal> | null {
+  const returnOnEquity = safeDecimal(position.returnOnEquity);
+  if (returnOnEquity) {
+    return returnOnEquity.abs().lte(1) ? returnOnEquity.mul(100) : returnOnEquity;
+  }
+
+  const margin = safeDecimal(position.marginUsed);
+  const unrealizedPnl = safeDecimal(position.unrealizedPnl);
+  if (margin?.gt(0) && unrealizedPnl) return unrealizedPnl.div(margin).mul(100);
+  return null;
+}
+
+function liveReturnDetail(position: ExecutionPosition): string {
+  return position.marginUsed ? `live ROE on ${toDecimalString(position.marginUsed, 2)} USDC margin` : "live ROE";
+}
+
+function safeDecimal(value?: string): ReturnType<typeof decimal> | null {
+  if (value === undefined || value === "") return null;
+  try {
+    return decimal(value);
+  } catch {
+    return null;
+  }
 }
 
 function EmptyState({ title, detail }: { title: string; detail: string }) {

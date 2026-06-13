@@ -82,7 +82,7 @@ function buildSummaryFromPropr(
     decimal(balance).plus(unrealizedPnl).plus(account.isolatedPositionMargin ?? "0").toString(),
   );
   const highWaterMark = pickString(account.highWaterMark, Decimal.max(equity, startingBalance).toString());
-  const dayStartEquity = pickString(account.dayStartEquity, account.dailyStartEquity, account.startOfDayEquity, equity);
+  const dayStartEquity = pickString(account.dayStartEquity, account.dailyStartEquity, account.startOfDayEquity, startingBalance);
   const realizedPnl = pickString(
     attempt.totalPnl,
     attempt.totalProfitLoss,
@@ -170,12 +170,12 @@ function buildSummary(input: {
     unrealizedPnl: formatUsd(input.unrealizedPnl),
     availableBalance: input.availableBalance ? formatUsd(input.availableBalance) : undefined,
     profitTarget: formatUsd(profitTarget),
-    profitProgressPct: pct(decimal(input.realizedPnl), profitTarget),
+    profitProgressPct: signedPct(decimal(input.equity).minus(input.startingBalance), input.startingBalance),
     dailyLossLimit: formatUsd(dailyLossLimit),
     dayStartEquity: formatUsd(input.dayStartEquity),
-    dailyLossUsedPct: pct(Decimal.max(0, decimal(input.dayStartEquity).minus(input.equity)), dailyLossLimit),
+    dailyLossUsedPct: boundedPct(Decimal.max(0, decimal(input.dayStartEquity).minus(input.equity)), dailyLossLimit),
     drawdownLimit: formatUsd(drawdownLimit),
-    drawdownUsedPct: pct(
+    drawdownUsedPct: boundedPct(
       Decimal.max(0, decimal(input.highWaterMark).minus(input.equity)),
       decimal(input.highWaterMark).minus(drawdownLimit).toString(),
     ),
@@ -189,10 +189,16 @@ function inferRuleSet(attempt: ProprChallengeAttempt): ProprChallengeRuleSet {
   return phaseCount > 1 ? PROPR_CLASSIC_2_STEP_RULES : PROPR_CLASSIC_1_STEP_RULES;
 }
 
-function pct(value: ReturnType<typeof decimal>, denominator: string): string {
+function boundedPct(value: ReturnType<typeof decimal>, denominator: string): string {
   const base = decimal(denominator);
   if (!base.gt(0)) return "0";
   return toDecimalString(Decimal.min(100, Decimal.max(0, value.div(base).mul(100))), 1);
+}
+
+function signedPct(value: ReturnType<typeof decimal>, denominator: string): string {
+  const base = decimal(denominator);
+  if (!base.gt(0)) return "0";
+  return toDecimalString(value.div(base).mul(100), 2);
 }
 
 function formatUsd(value: string): string {

@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 
 export function ChallengePanel({ challenge }: { challenge: ProprChallengeSummary }) {
   const dailySafety = dailySafetyStop(challenge);
+  const netPnl = challengeNetPnl(challenge);
 
   return (
     <Card className="rounded-lg">
@@ -34,7 +35,7 @@ export function ChallengePanel({ challenge }: { challenge: ProprChallengeSummary
       <CardContent className="flex flex-col gap-4">
         <div className="grid gap-3 md:grid-cols-3">
           <ChallengeMetric label="Equity" value={`${challenge.equity} USDC`} detail={`Balance ${challenge.balance}`} />
-          <ChallengeMetric label="Profit target" value={`${challenge.profitProgressPct}%`} detail={`${challenge.realizedPnl} / ${challenge.profitTarget} USDC`} />
+          <ChallengeMetric label="Profit target" value={`${challenge.profitProgressPct}%`} detail={`${netPnl} / ${challenge.profitTarget} USDC`} />
           <ChallengeMetric label="Available" value={`${challenge.availableBalance ?? "n/a"} USDC`} detail={challenge.accountId ? `Account ${challenge.accountId}` : "No account synced"} />
         </div>
 
@@ -63,7 +64,7 @@ export function ChallengePanel({ challenge }: { challenge: ProprChallengeSummary
           <ChallengeProgress
             label="Objective"
             value={challenge.profitProgressPct}
-            detail={`${challenge.ruleSet.profitTargetPct}% target, closed PnL only`}
+            detail={`${challenge.ruleSet.profitTargetPct}% target, equity vs initial balance`}
             tone="primary"
           />
           <ChallengeProgress
@@ -117,6 +118,14 @@ function dailySafetyStop(challenge: ProprChallengeSummary): {
     usedPct: toDecimalString(usedPct, 1),
     status: remaining.lte(0) ? "stop" : usedPct.gte(80) ? "warning" : "safe",
   };
+}
+
+function challengeNetPnl(challenge: ProprChallengeSummary): string {
+  try {
+    return toDecimalString(decimal(challenge.equity).minus(challenge.startingBalance), 2);
+  } catch {
+    return "0";
+  }
 }
 
 function ChallengeMetric({ label, value, detail }: { label: string; value: string; detail: string }) {
