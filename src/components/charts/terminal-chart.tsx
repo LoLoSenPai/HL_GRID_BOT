@@ -301,17 +301,14 @@ function buildFillMarkers(fills: ChartFill[]): SeriesMarker<Time>[] {
 
   for (const fill of fills) {
     const timestamp = Date.parse(fill.executedAt);
-    const price = Number(fill.price);
-    if (!Number.isFinite(timestamp) || !Number.isFinite(price) || price <= 0) continue;
+    if (!Number.isFinite(timestamp)) continue;
 
     markers.push({
       id: fill.id,
       time: (Math.floor(timestamp / 1000 / 900) * 900) as UTCTimestamp,
-      position: "atPriceMiddle",
-      price,
+      position: fill.side === "buy" ? "belowBar" : "aboveBar",
       shape: fill.side === "buy" ? "arrowUp" : "arrowDown",
       color: fill.side === "buy" ? "#10b981" : "#ef4444",
-      text: `${fill.side} ${compactQuantity(fill.quantity)}`,
       size: 1.2,
     });
   }
