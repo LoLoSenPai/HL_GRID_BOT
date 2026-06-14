@@ -778,6 +778,27 @@ export function GridConfigPanel({
     });
   };
 
+  const updateActiveBotExitPrices = () => {
+    if (!activeBot) return;
+    setActionError(null);
+    startTransition(async () => {
+      const response = await fetch(`/api/bots/${activeBot.id}/exit-prices`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          takeProfit: challengeConfig.takeProfit ?? "",
+          stopLoss: challengeConfig.stopLoss ?? "",
+        }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        setActionError(payload.error ?? "Unable to update bot exit levels.");
+        return;
+      }
+      router.refresh();
+    });
+  };
+
   return (
     <>
     <Card className="rounded-lg">
@@ -864,6 +885,12 @@ export function GridConfigPanel({
           <Field label="Stop loss">
             <Input value={challengeConfig.stopLoss ?? ""} onChange={(event) => patch({ stopLoss: event.target.value })} />
           </Field>
+          {activeBot ? (
+            <Button className="col-span-2" variant="outline" disabled={pending} onClick={updateActiveBotExitPrices}>
+              <ShieldCheck data-icon="inline-start" />
+              Save SL / TP for active bot
+            </Button>
+          ) : null}
         </div>
 
         <div className="flex items-center justify-between rounded-lg border bg-muted/30 p-3">

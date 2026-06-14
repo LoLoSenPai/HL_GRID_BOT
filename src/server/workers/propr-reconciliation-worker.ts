@@ -34,6 +34,8 @@ export interface ProprReconciliationSummary {
   placedGridOrders: number;
   staleOpenOrders: number;
   safetyStops: number;
+  stopLossStops: number;
+  takeProfitStops: number;
   errors: Array<{ botId: string; message: string }>;
 }
 
@@ -87,6 +89,8 @@ export async function runProprReconciliation(options: { botId?: string } = {}): 
     placedGridOrders: 0,
     staleOpenOrders: 0,
     safetyStops: 0,
+    stopLossStops: 0,
+    takeProfitStops: 0,
     errors: [],
   };
 
@@ -99,6 +103,8 @@ export async function runProprReconciliation(options: { botId?: string } = {}): 
       summary.placedGridOrders += result.placedGridOrders;
       summary.staleOpenOrders += result.staleOpenOrders ?? 0;
       if (result.safetyStopTriggered) summary.safetyStops += 1;
+      if (result.exitTrigger === "stop_loss") summary.stopLossStops += 1;
+      if (result.exitTrigger === "take_profit") summary.takeProfitStops += 1;
     } catch (error) {
       summary.errors.push({
         botId: bot.id,

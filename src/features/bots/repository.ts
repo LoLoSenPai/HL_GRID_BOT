@@ -1,6 +1,7 @@
 import { ulid } from "ulid";
 
-import { decimal, toDecimalString } from "@/domain/decimal";
+import { decimal, isPositiveDecimal, toDecimalString } from "@/domain/decimal";
+import { evaluateBotExitTrigger, type BotExitTrigger } from "@/domain/exit-rules";
 import { generateGridLevels, isOutOfRange, reduceOnlyForGridSide } from "@/domain/grid";
 import { formatMarketSymbol } from "@/domain/markets";
 import type {
@@ -315,6 +316,40 @@ export function updateBotStatus(id: string, status: BotStatus) {
     severity: status === "error" || status === "out_of_range" ? "warning" : "info",
     message: `Bot status changed to ${status}.`,
   });
+}
+
+export function updateBotExitPrices(
+  id: string,
+  exits: { takeProfit?: string | null; stopLoss?: string | null },
+): Bot {
+  bootstrapBots();
+  const bot = getBot(id);
+  if (!bot) throw new Error("Bot not found.");
+
+  const takeProfit = normalizeOptionalPositiveDecimal(exits.takeProfit, "Take profit");
+  const stopLoss = normalizeOptionalPositiveDecimal(exits.stopLoss, "Stop loss");
+  const now = new Date().toISOString();
+  const tx = getSqlite().transaction(() => {
+    getSqlite()
+      .prepare("UPDATE bot_configs SET take_profit = ?, stop_loss = ? WHERE bot_id = ?")
+      .run(takeProfit, stopLoss, id);
+    getSqlite().prepare("UPDATE bots SET updated_at = ? WHERE id = ?").run(now, id);
+    addEvent({
+      botId: id,
+      type: "bot.exit_prices_updated",
+      severity: "info",
+      message: `Bot exit levels updated: TP ${takeProfit ?? "disabled"}, SL ${stopLoss ?? "disabled"}.`,
+      payload: {
+        takeProfit,
+        stopLoss,
+      },
+    });
+  });
+  tx();
+
+  const updated = getBot(id);
+  if (!updated) throw new Error("Updated bot was not found.");
+  return updated;
 }
 
 export function deleteBot(id: string) {
@@ -776,6 +811,7 @@ export async function reconcileProprBot(id: string): Promise<{
   placedGridOrders: number;
   staleOpenOrders?: number;
   safetyStopTriggered?: boolean;
+  exitTrigger?: BotExitTrigger;
 }> {
   const bot = getBot(id);
   if (!bot) throw new Error("Bot not found.");
@@ -794,6 +830,11 @@ export async function reconcileProprBot(id: string): Promise<{
     adapter.getTrades(bot.config.pair),
     adapter.getPositions(bot.config.pair),
   ]);
+  const matchingPosition = positions.find(
+    (position) => position.asset === bot.config.pair && position.positionSide === bot.config.positionSide,
+  );
+  const markPrice = matchingPosition?.markPrice ?? positions.find((position) => position.asset === bot.config.pair)?.markPrice;
+  const exitEvaluation = evaluateBotExitTrigger(bot.config, markPrice);
   const openProviderIds = new Set(openProviderOrders.map((order) => order.providerOrderId ?? order.id));
   const persistedOrders = listOrders(bot.id);
   const now = new Date().toISOString();
@@ -852,16 +893,36 @@ export async function reconcileProprBot(id: string): Promise<{
       insertedFills += result.changes;
     }
 
-    const placedGridOrder = hasGridLevelIndex(order)
+    const placedGridOrder = !exitEvaluation?.trigger && hasGridLevelIndex(order)
       ? await placePairedGridOrderIfMissing(bot, adapter, order, listOrders(bot.id), openProviderIds)
       : null;
     if (placedGridOrder) placedGridOrders += 1;
   }
 
+  if (exitEvaluation?.trigger) {
+    const exitLabel = exitEvaluation.trigger === "stop_loss" ? "Stop loss" : "Take profit";
+    addEvent({
+      botId: bot.id,
+      type: exitEvaluation.trigger === "stop_loss" ? "bot.propr_stop_loss_triggered" : "bot.propr_take_profit_triggered",
+      severity: "warning",
+      message: `${exitLabel} triggered for ${formatMarketSymbol(bot.config.pair)} ${bot.config.positionSide}: mark ${exitEvaluation.markPrice}, level ${exitEvaluation.triggerPrice}.`,
+      payload: {
+        trigger: exitEvaluation.trigger,
+        markPrice: exitEvaluation.markPrice,
+        triggerPrice: exitEvaluation.triggerPrice,
+        positionSide: bot.config.positionSide,
+      },
+    });
+    await closeBot(
+      bot.id,
+      `${exitLabel} triggered at mark ${exitEvaluation.markPrice} against level ${exitEvaluation.triggerPrice}.`,
+    );
+    return { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders, exitTrigger: exitEvaluation.trigger };
+  }
+
   const repairedGridOrders = await repairMissingGridOrders(bot, adapter, openProviderIds);
   placedGridOrders += repairedGridOrders;
 
-  const markPrice = positions.find((position) => position.asset === bot.config.pair)?.markPrice;
   updateRuntimeFromAggregates(bot.id, markPrice ?? midpoint(bot.config));
   addEvent({
     botId: bot.id,
@@ -1728,6 +1789,15 @@ async function assertChallengeRiskBudget(botId: string, config: GridConfig) {
 
 function midpoint(config: GridConfig): string {
   return toDecimalString(decimal(config.lowerPrice).plus(config.upperPrice).div(2), 6);
+}
+
+function normalizeOptionalPositiveDecimal(value: string | null | undefined, label: string): string | null {
+  const normalized = value?.trim();
+  if (!normalized) return null;
+  if (!isPositiveDecimal(normalized)) {
+    throw new Error(`${label} must be a positive decimal.`);
+  }
+  return normalized;
 }
 
 function liveCandidateName(name: string): string {
