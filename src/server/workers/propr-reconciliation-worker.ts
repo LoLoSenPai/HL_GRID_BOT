@@ -29,6 +29,10 @@ const PROPR_WS_ACTIONABLE_EVENTS = new Set([
 export interface ProprReconciliationSummary {
   scanned: number;
   reconciled: number;
+  syncedOrders: number;
+  insertedFills: number;
+  placedGridOrders: number;
+  staleOpenOrders: number;
   safetyStops: number;
   errors: Array<{ botId: string; message: string }>;
 }
@@ -78,6 +82,10 @@ export async function runProprReconciliation(options: { botId?: string } = {}): 
   const summary: ProprReconciliationSummary = {
     scanned: bots.length,
     reconciled: 0,
+    syncedOrders: 0,
+    insertedFills: 0,
+    placedGridOrders: 0,
+    staleOpenOrders: 0,
     safetyStops: 0,
     errors: [],
   };
@@ -86,6 +94,10 @@ export async function runProprReconciliation(options: { botId?: string } = {}): 
     try {
       const result = await reconcileProprBot(bot.id);
       summary.reconciled += 1;
+      summary.syncedOrders += result.syncedOrders;
+      summary.insertedFills += result.insertedFills;
+      summary.placedGridOrders += result.placedGridOrders;
+      summary.staleOpenOrders += result.staleOpenOrders ?? 0;
       if (result.safetyStopTriggered) summary.safetyStops += 1;
     } catch (error) {
       summary.errors.push({

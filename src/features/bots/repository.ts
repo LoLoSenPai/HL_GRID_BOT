@@ -774,6 +774,7 @@ export async function reconcileProprBot(id: string): Promise<{
   syncedOrders: number;
   insertedFills: number;
   placedGridOrders: number;
+  staleOpenOrders?: number;
   safetyStopTriggered?: boolean;
 }> {
   const bot = getBot(id);
@@ -785,7 +786,7 @@ export async function reconcileProprBot(id: string): Promise<{
   const adapter = new ProprExecutionAdapter();
   const safetyStopTriggered = await enforceProprChallengeSafetyStop(bot, adapter);
   if (safetyStopTriggered) {
-    return { syncedOrders: 0, insertedFills: 0, placedGridOrders: 0, safetyStopTriggered: true };
+    return { syncedOrders: 0, insertedFills: 0, placedGridOrders: 0, staleOpenOrders: 0, safetyStopTriggered: true };
   }
 
   const [openProviderOrders, trades, positions] = await Promise.all([
@@ -870,7 +871,7 @@ export async function reconcileProprBot(id: string): Promise<{
     payload: { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders },
   });
 
-  return { syncedOrders, insertedFills, placedGridOrders };
+  return { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders };
 }
 
 function markStaleLocalOpenOrdersCancelled(
