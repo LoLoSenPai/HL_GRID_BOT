@@ -11,13 +11,11 @@ export async function POST(request: NextRequest) {
   const nextPath = safeNextPath(formData.get("next"));
 
   if (!(await validateCredentials(username, password))) {
-    const loginUrl = new URL("/login", request.url);
-    loginUrl.searchParams.set("error", "invalid");
-    loginUrl.searchParams.set("next", nextPath);
-    return NextResponse.redirect(loginUrl, { status: 303 });
+    const loginParams = new URLSearchParams({ error: "invalid", next: nextPath });
+    return redirectTo(`/login?${loginParams.toString()}`);
   }
 
-  const response = NextResponse.redirect(new URL(nextPath, request.url), { status: 303 });
+  const response = redirectTo(nextPath);
   response.cookies.set(AUTH_COOKIE_NAME, await createSessionToken(username), {
     httpOnly: true,
     sameSite: "lax",
@@ -26,6 +24,15 @@ export async function POST(request: NextRequest) {
     maxAge: AUTH_MAX_AGE_SECONDS,
   });
   return response;
+}
+
+function redirectTo(path: string): NextResponse {
+  return new NextResponse(null, {
+    status: 303,
+    headers: {
+      Location: path,
+    },
+  });
 }
 
 function isSecureRequest(request: NextRequest): boolean {

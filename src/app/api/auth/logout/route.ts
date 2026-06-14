@@ -5,7 +5,12 @@ import { AUTH_COOKIE_NAME } from "@/lib/auth/session";
 export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
-  const response = NextResponse.redirect(new URL("/login", request.url), { status: 303 });
+  const response = new NextResponse(null, {
+    status: 303,
+    headers: {
+      Location: "/login",
+    },
+  });
   response.cookies.set(AUTH_COOKIE_NAME, "", {
     httpOnly: true,
     sameSite: "lax",
