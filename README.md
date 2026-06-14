@@ -13,8 +13,13 @@ PROPR_API_URL=https://api.propr.xyz/v1
 PROPR_WS_URL=wss://api.propr.xyz/ws
 PROPR_ACCOUNT_ID=HRjAbEbasfZ1
 
+APP_AUTH_USERNAME=loic
+APP_AUTH_PASSWORD=
+APP_AUTH_SECRET=
+
 DATABASE_URL=file:/app/data/hl_grid_bot.sqlite
 PROPR_WORKER_INTERVAL_MS=10000
+APP_BIND=127.0.0.1
 APP_PORT=3000
 ```
 
@@ -22,7 +27,15 @@ APP_PORT=3000
 (`urn:prp-account:HRjAbEbasfZ1`).
 
 `PROPR_API_KEY` ne doit jamais etre prefixe par `NEXT_PUBLIC_`. Un exemple sans secret est disponible dans
-`env.vps.example`.
+`env.EXAMPLE`.
+
+`APP_AUTH_PASSWORD` protege l'interface web. `APP_AUTH_SECRET` sert a signer le cookie de session et doit faire au moins
+32 caracteres. Sur le VPS:
+
+```bash
+openssl rand -base64 24
+openssl rand -base64 48
+```
 
 ## Local Docker
 
@@ -70,9 +83,23 @@ Ensuite envoyer le repo et le dossier `data/` sur le VPS, puis creer `.env` depu
 Sur le VPS:
 
 ```bash
+cd ~/bots
+git clone https://github.com/LoLoSenPai/HL_GRID_BOT.git hl-grid-bot
+cd hl-grid-bot
+cp env.EXAMPLE .env
+# Renseigner PROPR_API_KEY, PROPR_ACCOUNT_ID, APP_AUTH_PASSWORD et APP_AUTH_SECRET
 docker compose -f docker-compose.prod.yml up --build -d
 curl http://127.0.0.1:3000/api/health
 docker compose -f docker-compose.prod.yml logs -f app worker
+```
+
+Par defaut, `docker-compose.prod.yml` publie l'app sur `127.0.0.1:3000`. Pour ouvrir le terminal depuis Internet, mettre
+un reverse proxy HTTPS devant ce port. Exemple Caddy:
+
+```caddy
+grid.lololabs.xyz {
+  reverse_proxy 127.0.0.1:3000
+}
 ```
 
 Une fois le VPS verifie, garder le Docker local stoppe. Les ordres Propr deja ouverts restent chez Propr; le worker VPS

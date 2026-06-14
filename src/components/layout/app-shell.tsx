@@ -9,6 +9,7 @@ import {
   FlaskConical,
   Gauge,
   LayoutDashboard,
+  LogOut,
   Settings,
   ShieldAlert,
   SquareTerminal,
@@ -43,6 +44,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       : killSwitchActive
         ? "Emergency sent"
         : "Kill switch";
+
+  if (pathname === "/login") {
+    return <>{children}</>;
+  }
 
   const activateKillSwitch = async () => {
     if (killPending) return;
@@ -105,7 +110,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             );
           })}
         </nav>
-        <div className="border-t p-3">
+        <div className="flex flex-col gap-2 border-t p-3">
+          <form action="/api/auth/logout" method="post">
+            <Button variant="ghost" className="h-9 w-full justify-start gap-2" type="submit">
+              <LogOut data-icon="inline-start" />
+              Logout
+            </Button>
+          </form>
           <Button
             variant={killSwitchActive || killError ? "destructive" : "outline"}
             className="h-9 w-full justify-start gap-2"

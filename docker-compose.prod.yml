@@ -11,7 +11,7 @@ services:
       NEXT_TELEMETRY_DISABLED: "1"
       DATABASE_URL: file:/app/data/hl_grid_bot.sqlite
     ports:
-      - "${APP_PORT:-3000}:3000"
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-3000}:3000"
     volumes:
       - ./data:/app/data
     command: ["npm", "run", "start", "--", "--hostname", "0.0.0.0"]
