@@ -799,6 +799,7 @@ export async function reconcileProprBot(id: string): Promise<{
   let syncedOrders = 0;
   let insertedFills = 0;
   let placedGridOrders = 0;
+  const staleOpenOrders = markStaleLocalOpenOrdersCancelled(bot.id, persistedOrders, openProviderIds, trades, now);
 
   for (const order of persistedOrders.filter((item) => !["cancelled", "rejected"].includes(item.status))) {
     const providerOrderId = order.provider_order_id ?? order.id;
@@ -851,12 +852,12 @@ export async function reconcileProprBot(id: string): Promise<{
     }
 
     const placedGridOrder = hasGridLevelIndex(order)
-      ? await placePairedGridOrderIfMissing(bot, adapter, order, listOrders(bot.id))
+      ? await placePairedGridOrderIfMissing(bot, adapter, order, listOrders(bot.id), openProviderIds)
       : null;
     if (placedGridOrder) placedGridOrders += 1;
   }
 
-  const repairedGridOrders = await repairMissingGridOrders(bot, adapter);
+  const repairedGridOrders = await repairMissingGridOrders(bot, adapter, openProviderIds);
   placedGridOrders += repairedGridOrders;
 
   const markPrice = positions.find((position) => position.asset === bot.config.pair)?.markPrice;
@@ -865,20 +866,56 @@ export async function reconcileProprBot(id: string): Promise<{
     botId: bot.id,
     type: "bot.propr_reconciled",
     severity: "success",
-    message: `Propr sync complete: ${syncedOrders} filled orders, ${insertedFills} new fills, ${placedGridOrders} grid orders.`,
-    payload: { syncedOrders, insertedFills, placedGridOrders },
+    message: `Propr sync complete: ${syncedOrders} filled orders, ${insertedFills} new fills, ${placedGridOrders} grid orders, ${staleOpenOrders} stale locals.`,
+    payload: { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders },
   });
 
   return { syncedOrders, insertedFills, placedGridOrders };
 }
 
-async function repairMissingGridOrders(bot: Bot, adapter: ProprExecutionAdapter): Promise<number> {
+function markStaleLocalOpenOrdersCancelled(
+  botId: string,
+  orders: PersistedOrder[],
+  openProviderIds: Set<string>,
+  trades: Awaited<ReturnType<ProprExecutionAdapter["getTrades"]>>,
+  timestamp: string,
+): number {
+  let staleOpenOrders = 0;
+  for (const order of orders.filter((item) => ["pending", "open", "partially_filled"].includes(item.status))) {
+    const providerOrderId = order.provider_order_id ?? order.id;
+    if (openProviderIds.has(providerOrderId)) continue;
+    if (trades.some((trade) => trade.orderId === providerOrderId)) continue;
+
+    getSqlite()
+      .prepare("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE bot_id = ? AND id = ?")
+      .run(timestamp, botId, order.id);
+    staleOpenOrders += 1;
+  }
+
+  if (staleOpenOrders > 0) {
+    addEvent({
+      botId,
+      type: "bot.propr_stale_orders_cleared",
+      severity: "warning",
+      message: `${staleOpenOrders} local open orders were not open on Propr and were cleared before grid repair.`,
+      payload: { staleOpenOrders },
+    });
+  }
+
+  return staleOpenOrders;
+}
+
+async function repairMissingGridOrders(
+  bot: Bot,
+  adapter: ProprExecutionAdapter,
+  openProviderIds: Set<string>,
+): Promise<number> {
   let placedGridOrders = 0;
   let knownOrders = listOrders(bot.id);
   const filledGridOrders = knownOrders.filter((order) => order.status === "filled" && hasGridLevelIndex(order));
 
   for (const filledOrder of filledGridOrders) {
-    const placedGridOrder = await placePairedGridOrderIfMissing(bot, adapter, filledOrder, knownOrders);
+    const placedGridOrder = await placePairedGridOrderIfMissing(bot, adapter, filledOrder, knownOrders, openProviderIds);
     if (!placedGridOrder) continue;
     placedGridOrders += 1;
     knownOrders = listOrders(bot.id);
@@ -892,6 +929,7 @@ async function placePairedGridOrderIfMissing(
   adapter: ProprExecutionAdapter,
   filledOrder: PersistedOrder,
   knownOrders: PersistedOrder[],
+  openProviderIds: Set<string>,
 ): Promise<ExecutionOrder | null> {
   const nextIntent = pairedOrder(bot.config, filledOrder);
   const existingGridOrder = knownOrders.some(
@@ -901,7 +939,7 @@ async function placePairedGridOrderIfMissing(
       order.side === nextIntent.side &&
       order.reduce_only === (nextIntent.reduceOnly ? 1 : 0) &&
       order.grid_level_id === nextIntent.gridLevelId &&
-      blocksPairedGridReplacement(order, filledOrder),
+      blocksPairedGridReplacement(order, filledOrder, openProviderIds),
   );
 
   if (existingGridOrder) return null;
@@ -920,11 +958,19 @@ async function placePairedGridOrderIfMissing(
     reduceOnly: nextIntent.reduceOnly,
   });
   insertOrder(placedGridOrder);
+  openProviderIds.add(placedGridOrder.providerOrderId ?? placedGridOrder.id);
   return placedGridOrder;
 }
 
-function blocksPairedGridReplacement(candidate: PersistedOrder, filledOrder: PersistedOrder): boolean {
-  if (["open", "pending", "partially_filled"].includes(candidate.status)) return true;
+function blocksPairedGridReplacement(
+  candidate: PersistedOrder,
+  filledOrder: PersistedOrder,
+  openProviderIds: Set<string>,
+): boolean {
+  if (["open", "pending", "partially_filled"].includes(candidate.status)) {
+    const providerOrderId = candidate.provider_order_id ?? candidate.id;
+    return openProviderIds.has(providerOrderId);
+  }
   if (candidate.status !== "filled") return false;
 
   const candidateCreatedAt = Date.parse(candidate.created_at);
