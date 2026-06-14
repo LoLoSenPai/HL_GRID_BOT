@@ -15,7 +15,6 @@ import { logger } from "@/lib/logger";
 export interface ProprChallengeSummary {
   source: "propr_live" | "local_fallback";
   checkedAt: string;
-  activeEnv: "beta" | "live";
   accountId?: string;
   attemptId?: string;
   status: "active" | "unavailable";
@@ -41,15 +40,15 @@ export interface ProprChallengeSummary {
 export async function getProprChallengeSummary(metrics: RuntimeMetrics): Promise<ProprChallengeSummary> {
   const env = getEnv();
 
-  if (!env.PROPR_API_KEY || env.PROPR_ACTIVE_ENV !== "live") {
-    return localFallbackSummary(metrics, env.PROPR_ACTIVE_ENV, "Propr live API is not selected or configured.");
+  if (!env.PROPR_API_KEY) {
+    return localFallbackSummary(metrics, "Propr API key is not configured.");
   }
 
   try {
     const client = createProprClient();
     const attempts = await client.getChallengeAttempts({ status: "active" });
     if (!attempts[0]?.accountId) {
-      return localFallbackSummary(metrics, env.PROPR_ACTIVE_ENV, "No active Propr challenge account found.");
+      return localFallbackSummary(metrics, "No active Propr challenge account found.");
     }
 
     const accountId = await client.setup();
@@ -59,18 +58,17 @@ export async function getProprChallengeSummary(metrics: RuntimeMetrics): Promise
       attempt.attemptId ? client.getChallengeAttempt(attempt.attemptId).catch(() => attempt) : Promise.resolve(attempt),
     ]);
 
-    return buildSummaryFromPropr(account, detailedAttempt, env.PROPR_ACTIVE_ENV);
+    return buildSummaryFromPropr(account, detailedAttempt);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown Propr challenge error";
     logger.warn("propr.challenge_summary_fallback", { error: message });
-    return localFallbackSummary(metrics, env.PROPR_ACTIVE_ENV, message);
+    return localFallbackSummary(metrics, message);
   }
 }
 
 function buildSummaryFromPropr(
   account: ProprAccount,
   attempt: ProprChallengeAttempt,
-  activeEnv: "beta" | "live",
 ): ProprChallengeSummary {
   const ruleSet = inferRuleSet(attempt);
   const startingBalance = pickString(attempt.currentPhase?.startingBalance, attempt.phases?.[0]?.startingBalance, "5000");
@@ -92,7 +90,6 @@ function buildSummaryFromPropr(
 
   return buildSummary({
     source: "propr_live",
-    activeEnv,
     accountId: redactIdentifier(account.accountId ?? attempt.accountId),
     attemptId: redactIdentifier(attempt.attemptId),
     label: `${ruleSet.label} challenge`,
@@ -110,7 +107,6 @@ function buildSummaryFromPropr(
 
 function localFallbackSummary(
   _metrics: RuntimeMetrics,
-  activeEnv: "beta" | "live",
   warning: string,
 ): ProprChallengeSummary {
   const startingBalance = "5000";
@@ -119,7 +115,6 @@ function localFallbackSummary(
 
   return buildSummary({
     source: "local_fallback",
-    activeEnv,
     label: "Classic 1-Step challenge",
     ruleSet: PROPR_CLASSIC_1_STEP_RULES,
     startingBalance,
@@ -135,7 +130,6 @@ function localFallbackSummary(
 
 function buildSummary(input: {
   source: "propr_live" | "local_fallback";
-  activeEnv: "beta" | "live";
   accountId?: string;
   attemptId?: string;
   label: string;
@@ -157,7 +151,6 @@ function buildSummary(input: {
   return {
     source: input.source,
     checkedAt: new Date().toISOString(),
-    activeEnv: input.activeEnv,
     accountId: input.accountId,
     attemptId: input.attemptId,
     status: input.source === "propr_live" ? "active" : "unavailable",

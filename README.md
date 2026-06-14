@@ -1,99 +1,89 @@
 # HL Grid Bot
 
-Terminal de grid trading pour challenge Propr. En V1, le write path live passe par Propr; Hyperliquid sert de référence
-market data.
+Terminal de grid trading pour challenge Propr. En V1, l'execution live passe uniquement par l'API Propr live. Le compte
+peut etre un challenge paper Propr, mais l'API cible reste `https://api.propr.xyz/v1`.
 
 ## Configuration
 
-Configure the Propr execution profile in `.env`:
+Variables serveur dans `.env`:
 
 ```bash
-PROPR_ACTIVE_ENV=live # beta | live
+PROPR_API_KEY=
+PROPR_API_URL=https://api.propr.xyz/v1
+PROPR_WS_URL=wss://api.propr.xyz/ws
+PROPR_ACCOUNT_ID=HRjAbEbasfZ1
 
-PROPR_BETA_API_KEY=
-PROPR_BETA_API_URL=
-PROPR_BETA_WS_URL=
-
-PROPR_LIVE_API_KEY=
-PROPR_LIVE_API_URL=
-PROPR_LIVE_WS_URL=
-PROPR_LIVE_ACCOUNT_ID=urn:prp-account:...
-
-DATABASE_URL=file:./data/hl_grid_bot.sqlite
+DATABASE_URL=file:/app/data/hl_grid_bot.sqlite
+PROPR_WORKER_INTERVAL_MS=10000
+APP_PORT=3000
 ```
 
-Local simulation uses SQLite and does not need Propr credentials. Propr credentials are server-only and must not be
-prefixed with `NEXT_PUBLIC_`.
+`PROPR_ACCOUNT_ID` accepte le suffixe court (`HRjAbEbasfZ1`) ou l'URN complet renvoye par Propr
+(`urn:prp-account:HRjAbEbasfZ1`).
 
-## Local Test Mode With Docker
+`PROPR_API_KEY` ne doit jamais etre prefixe par `NEXT_PUBLIC_`. Un exemple sans secret est disponible dans
+`env.vps.example`.
 
-This is the recommended setup for the first real tests from a local PC. It runs:
+## Local Docker
 
-- `app`: Next.js UI and API on `http://localhost:3000`
-- `worker`: permanent Propr reconciliation and safety loop
-- `hl-grid-bot-data`: Docker volume containing the SQLite database
-
-Start:
+Ce mode lance l'UI/API Next.js et le worker Propr sur le PC local:
 
 ```bash
 npm run docker:local:up
-```
-
-Watch logs:
-
-```bash
 npm run docker:local:logs
+npm run docker:local:stop
 ```
 
-Stop:
+La base SQLite locale Docker vit dans le volume `hl-grid-bot-data`.
+
+## VPS Docker
+
+Sur VPS, utiliser `docker-compose.prod.yml`. Il lance:
+
+- `app`: UI/API Next.js sur `APP_PORT` (`3000` par defaut).
+- `worker`: reconciliation Propr, WebSocket Propr et safety loop.
+- `./data`: dossier persistant contenant `hl_grid_bot.sqlite`.
+
+Commandes:
 
 ```bash
-npm run docker:local:down
+npm run docker:prod:up
+npm run docker:prod:logs
+npm run docker:prod:stop
 ```
 
-Reset local Docker state, including bots/orders/fills:
+Ne pas faire tourner le worker local et le worker VPS en meme temps sur le meme `PROPR_ACCOUNT_ID`.
+
+## Copier l'etat local vers le VPS
+
+Pour garder les bots/orders/fills existants, copier la base SQLite locale au lieu de repartir de zero.
+
+Sur le PC local:
 
 ```bash
-docker compose -f docker-compose.local.yml down -v
+npm run docker:local:stop
+docker compose -f docker-compose.local.yml run --rm --no-deps -v ${PWD}/data:/backup app sh -c "cp -a /app/data/. /backup/"
 ```
 
-Do not run another local `npm run start` on port `3000` at the same time as Docker.
+Ensuite envoyer le repo et le dossier `data/` sur le VPS, puis creer `.env` depuis `env.EXAMPLE`.
 
-## Local Non-Docker Mode
-
-Run the web app:
+Sur le VPS:
 
 ```bash
-npm run build
-npm run start -- --hostname 0.0.0.0
+docker compose -f docker-compose.prod.yml up --build -d
+curl http://127.0.0.1:3000/api/health
+docker compose -f docker-compose.prod.yml logs -f app worker
 ```
 
-In another terminal, run the Propr worker:
+Une fois le VPS verifie, garder le Docker local stoppe. Les ordres Propr deja ouverts restent chez Propr; le worker VPS
+reprend la reconciliation a partir de la base copiee.
 
-```bash
-npm run worker:propr
-```
+## Production Notes
 
-## Vercel Status
-
-The repo can be adapted for Vercel UI/demo hosting, but Vercel alone is not the correct runtime for real trading yet:
-
-- SQLite is local file storage; Vercel serverless filesystem is ephemeral and not shared.
-- `worker:propr` is a long-running process; Vercel Functions/Cron are request-based and duration-limited.
-
-For production-style deployment, use:
-
-- Vercel for the Next.js UI/API.
-- Managed Postgres/Turso/Supabase/Neon for persistence.
-- A VPS/Railway/Fly/Render worker running `npm run worker:propr` permanently against the same database.
-
-## Development
-
-```bash
-npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000).
+- Mettre un reverse proxy HTTPS devant `APP_PORT` si le terminal doit etre partage via un domaine.
+- Sauvegarder regulierement le dossier `data/`, surtout avant une mise a jour.
+- Verifier `/settings` apres deploiement: auth Propr, challenge actif, account id et worker running.
+- Le bouton kill switch reste la procedure d'urgence cote UI.
 
 ## Checks
 
@@ -103,16 +93,3 @@ npm run lint
 npm test
 npm run build
 ```
-
-## Current Safety Model
-
-- Propr readiness must pass before challenge deployment.
-- Deploy opens a preview modal before sending entry orders.
-- The worker reconciles fills and adds reduce-only exits.
-- The safety stop closes exposure if the internal daily stop floor is reached.
-- The global kill switch cancels Propr orders and attempts reduce-only market closes.
-
-## Deployment Path
-
-First test locally with Docker. Then migrate persistence away from SQLite before splitting UI to Vercel and worker to a
-VPS/service.

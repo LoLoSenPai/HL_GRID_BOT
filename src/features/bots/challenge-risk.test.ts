@@ -7,7 +7,6 @@ import type { ProprChallengeSummary } from "@/features/propr/challenge-summary";
 const challenge: ProprChallengeSummary = {
   source: "propr_live",
   checkedAt: "2026-06-01T00:00:00.000Z",
-  activeEnv: "live",
   status: "active",
   label: "Classic 1-Step challenge",
   ruleSet: {

@@ -205,7 +205,7 @@ function startProprWebSocketListener(onActionableEvent: (eventType: string) => v
       enabled: false,
       connected: false,
       url: env.PROPR_WS_URL,
-      lastError: `${env.PROPR_SELECTED_API_KEY_NAME} is missing.`,
+      lastError: "PROPR_API_KEY is missing.",
     }));
     return;
   }

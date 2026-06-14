@@ -140,7 +140,7 @@ export class ProprClient {
     this.selectedAccountIdName = env.PROPR_SELECTED_ACCOUNT_ID_NAME;
 
     if (!this.apiKey) {
-      throw new Error(`${env.PROPR_SELECTED_API_KEY_NAME} is required for Propr live mode.`);
+      throw new Error("PROPR_API_KEY is required for Propr execution.");
     }
   }
 
@@ -149,12 +149,12 @@ export class ProprClient {
     const selectedAccountId = accountId ?? this.selectedAccountId;
 
     if (selectedAccountId) {
-      const selectedAttempt = attempts.find((attempt) => attempt.accountId === selectedAccountId);
+      const selectedAttempt = attempts.find((attempt) => accountIdMatches(attempt.accountId, selectedAccountId));
       if (!selectedAttempt) {
         throw new Error(`${this.selectedAccountIdName} does not match an active Propr challenge account.`);
       }
-      this.accountId = selectedAccountId;
-      return selectedAccountId;
+      this.accountId = selectedAttempt.accountId;
+      return selectedAttempt.accountId;
     }
 
     const attempt = attempts[0];
@@ -348,6 +348,12 @@ export class ProprClient {
 
 export function createProprClient(options?: ProprClientOptions) {
   return new ProprClient(options);
+}
+
+export function accountIdMatches(accountId: string | undefined, selectedAccountId: string): boolean {
+  if (!accountId) return false;
+  if (accountId === selectedAccountId) return true;
+  return accountId.endsWith(`:${selectedAccountId}`) || selectedAccountId.endsWith(`:${accountId}`);
 }
 
 export function proprPositionSideForIntent(intent: OrderIntent): string {

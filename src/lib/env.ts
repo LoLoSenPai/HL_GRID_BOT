@@ -4,19 +4,10 @@ const DEFAULT_PROPR_API_URL = "https://api.propr.xyz/v1";
 const DEFAULT_PROPR_WS_URL = "wss://api.propr.xyz/ws";
 
 const envSchema = z.object({
-  PROPR_ACTIVE_ENV: z.enum(["beta", "live"]).default("beta"),
-  PROPR_BETA_API_KEY: z.string().optional(),
-  PROPR_BETA_API_URL: z.string().url().optional(),
-  PROPR_BETA_WS_URL: z.string().url().optional(),
-  PROPR_LIVE_API_KEY: z.string().optional(),
-  PROPR_LIVE_API_URL: z.string().url().optional(),
-  PROPR_LIVE_WS_URL: z.string().url().optional(),
-  PROPR_LIVE_ACCOUNT_ID: z.string().optional(),
   PROPR_API_KEY: z.string().optional(),
   PROPR_API_URL: z.string().url().optional(),
   PROPR_WS_URL: z.string().url().optional(),
   PROPR_ACCOUNT_ID: z.string().optional(),
-  PROPR_BETA_ACCOUNT_ID: z.string().optional(),
   DATABASE_URL: z.string().default("file:./data/hl_grid_bot.sqlite"),
   DWELLIR_API_KEY: z.string().optional(),
 });
@@ -27,37 +18,19 @@ export type AppEnv = ParsedEnv & {
   PROPR_API_KEY?: string;
   PROPR_API_URL: string;
   PROPR_WS_URL: string;
-  PROPR_SELECTED_API_KEY_NAME: "PROPR_BETA_API_KEY" | "PROPR_LIVE_API_KEY";
-  PROPR_SELECTED_API_URL_NAME: "PROPR_BETA_API_URL" | "PROPR_LIVE_API_URL";
-  PROPR_SELECTED_WS_URL_NAME: "PROPR_BETA_WS_URL" | "PROPR_LIVE_WS_URL";
   PROPR_SELECTED_ACCOUNT_ID?: string;
-  PROPR_SELECTED_ACCOUNT_ID_NAME: "PROPR_BETA_ACCOUNT_ID" | "PROPR_LIVE_ACCOUNT_ID" | "PROPR_ACCOUNT_ID";
+  PROPR_SELECTED_ACCOUNT_ID_NAME: "PROPR_ACCOUNT_ID";
 };
 
 export function getEnv(): AppEnv {
   const env = envSchema.parse(process.env);
-  const useLive = env.PROPR_ACTIVE_ENV === "live";
 
   return {
     ...env,
-    PROPR_API_KEY: (useLive ? env.PROPR_LIVE_API_KEY : env.PROPR_BETA_API_KEY) ?? env.PROPR_API_KEY,
-    PROPR_API_URL:
-      (useLive ? env.PROPR_LIVE_API_URL : env.PROPR_BETA_API_URL) ??
-      env.PROPR_API_URL ??
-      DEFAULT_PROPR_API_URL,
-    PROPR_WS_URL:
-      (useLive ? env.PROPR_LIVE_WS_URL : env.PROPR_BETA_WS_URL) ?? env.PROPR_WS_URL ?? DEFAULT_PROPR_WS_URL,
-    PROPR_SELECTED_API_KEY_NAME: useLive ? "PROPR_LIVE_API_KEY" : "PROPR_BETA_API_KEY",
-    PROPR_SELECTED_API_URL_NAME: useLive ? "PROPR_LIVE_API_URL" : "PROPR_BETA_API_URL",
-    PROPR_SELECTED_WS_URL_NAME: useLive ? "PROPR_LIVE_WS_URL" : "PROPR_BETA_WS_URL",
-    PROPR_SELECTED_ACCOUNT_ID:
-      (useLive ? env.PROPR_LIVE_ACCOUNT_ID : env.PROPR_BETA_ACCOUNT_ID) ?? env.PROPR_ACCOUNT_ID,
-    PROPR_SELECTED_ACCOUNT_ID_NAME:
-      (useLive ? env.PROPR_LIVE_ACCOUNT_ID : env.PROPR_BETA_ACCOUNT_ID) || !env.PROPR_ACCOUNT_ID
-        ? useLive
-          ? "PROPR_LIVE_ACCOUNT_ID"
-          : "PROPR_BETA_ACCOUNT_ID"
-        : "PROPR_ACCOUNT_ID",
+    PROPR_API_URL: env.PROPR_API_URL ?? DEFAULT_PROPR_API_URL,
+    PROPR_WS_URL: env.PROPR_WS_URL ?? DEFAULT_PROPR_WS_URL,
+    PROPR_SELECTED_ACCOUNT_ID: env.PROPR_ACCOUNT_ID,
+    PROPR_SELECTED_ACCOUNT_ID_NAME: "PROPR_ACCOUNT_ID",
   };
 }
 

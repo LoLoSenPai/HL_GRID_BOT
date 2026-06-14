@@ -18,7 +18,7 @@ export interface ProprWebSocketClient {
 export function connectProprWebSocket(handler: ProprEventHandler): ProprWebSocketClient {
   const env = getEnv();
   if (!env.PROPR_API_KEY) {
-    throw new Error(`${env.PROPR_SELECTED_API_KEY_NAME} is required for Propr WebSocket.`);
+    throw new Error("PROPR_API_KEY is required for Propr WebSocket.");
   }
 
   const ws = new WebSocket(env.PROPR_WS_URL, {

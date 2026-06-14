@@ -3,6 +3,7 @@ import { RefreshCw } from "lucide-react";
 import { ActivityFeed } from "@/components/activity/activity-feed";
 import { ReactiveTerminalChart } from "@/components/charts/reactive-terminal-chart";
 import { ReactiveChallengeTicker } from "@/components/trading/reactive-challenge-ticker";
+import { ReactiveGridCyclesPanel } from "@/components/trading/reactive-grid-cycles-panel";
 import { ReactiveTerminalBotsTable } from "@/components/trading/reactive-terminal-bots-table";
 import { BotPerformanceStrip } from "@/components/trading/bot-performance-strip";
 import { GridConfigPanel } from "@/components/trading/grid-config-panel";
@@ -19,6 +20,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { deriveDefaultGridConfigFromPrice } from "@/domain/grid-defaults";
 import { formatMarketPair, formatMarketSymbol } from "@/domain/markets";
 import { reconcilePaperRuntimeAction, reconcileProprRuntimeAction } from "@/features/bots/actions";
+import { buildGridCycleReport, type GridCycleReport } from "@/features/bots/grid-cycles";
 import { getBotPerformance, getBotPerformanceRows, type BotPerformanceSummary } from "@/features/bots/performance";
 import {
   getBotRuntimeState,
@@ -60,6 +62,7 @@ export default async function GridTerminalPage({
   const runtimeState = activeBot ? getBotRuntimeState(activeBot.id) : null;
   const isChallengeBot = activeBot?.config.mode === "propr_live";
   const activeBotPerformance = activeBot ? getBotPerformance(activeBot) : null;
+  const gridCycleReport = activeBot ? buildGridCycleReport(activeBot, orders, fills) : null;
   const activeChallengeBot =
     activeBot && isChallengeBot && ["live", "running", "out_of_range"].includes(activeBot.status)
       ? {
@@ -161,6 +164,7 @@ export default async function GridTerminalPage({
                 <TabsList variant="line" className="h-8 rounded-none p-0">
                   <TabsTrigger value="bots">Active Bots</TabsTrigger>
                   <TabsTrigger value="overview">Overview</TabsTrigger>
+                  <TabsTrigger value="grid-cycles">Grid Cycles</TabsTrigger>
                   <TabsTrigger value="positions">Positions</TabsTrigger>
                   <TabsTrigger value="open-orders">Open Orders</TabsTrigger>
                   <TabsTrigger value="trades">Trade History</TabsTrigger>
@@ -186,10 +190,18 @@ export default async function GridTerminalPage({
 
               <TabsContent value="overview" className="min-h-0 flex-1 overflow-auto p-3">
                 {activeBotPerformance ? (
-                  <BotOverview summary={activeBotPerformance} runtimeMark={runtimeState?.lastPrice ?? market.mid} />
+                  <BotOverview
+                    summary={activeBotPerformance}
+                    runtimeMark={runtimeState?.lastPrice ?? market.mid}
+                    gridCycleReport={gridCycleReport}
+                  />
                 ) : (
                   <EmptyState title="No active bot" detail="Create a grid from the configuration panel to track performance here." />
                 )}
+              </TabsContent>
+
+              <TabsContent value="grid-cycles" className="min-h-0 flex-1 overflow-auto p-3">
+                <ReactiveGridCyclesPanel botId={activeBot?.id} initialReport={gridCycleReport} />
               </TabsContent>
 
               <TabsContent value="positions" className="min-h-0 flex-1 overflow-auto p-3">
@@ -293,9 +305,11 @@ function getTerminalLiveFills(bots: Bot[]): TerminalLiveFill[] {
 function BotOverview({
   summary,
   runtimeMark,
+  gridCycleReport,
 }: {
   summary: BotPerformanceSummary;
   runtimeMark?: string;
+  gridCycleReport?: GridCycleReport | null;
 }) {
   return (
     <div className="grid gap-3 2xl:grid-cols-[minmax(0,1fr)_390px]">
@@ -312,7 +326,8 @@ function BotOverview({
         <PnlBreakdownPanel
           asset={summary.bot.config.pair}
           positionSide={summary.bot.config.positionSide}
-          gridProfit={summary.realizedPnl}
+          gridProfit={gridCycleReport?.summary.closedNetPnl ?? summary.trackedPnl}
+          proprRealizedPnl={summary.realizedPnl}
           fees={summary.fees}
         />
       </div>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { proprPositionSideForIntent } from "@/features/propr/client";
+import { accountIdMatches, proprPositionSideForIntent } from "@/features/propr/client";
 import type { OrderIntent } from "@/features/execution/types";
 
 const baseIntent: OrderIntent = {
@@ -24,5 +24,12 @@ describe("Propr order mapping", () => {
     expect(proprPositionSideForIntent({ ...baseIntent, side: "buy", positionSide: "short", reduceOnly: true })).toBe(
       "long",
     );
+  });
+});
+
+describe("Propr account selection", () => {
+  it("matches a short account id against Propr urn account ids", () => {
+    expect(accountIdMatches("urn:prp-account:HRjAbEbasfZ1", "HRjAbEbasfZ1")).toBe(true);
+    expect(accountIdMatches("urn:prp-account:HRjAbEbasfZ1", "other")).toBe(false);
   });
 });

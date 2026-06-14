@@ -38,16 +38,13 @@ export default async function SettingsPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="grid gap-3 md:grid-cols-2">
-            <SettingRow label="PROPR_ACTIVE_ENV" value={env.PROPR_ACTIVE_ENV} />
-            <SettingRow label="Selected Propr API URL" value={env.PROPR_API_URL} />
-            <SettingRow label="Selected Propr WS URL" value={env.PROPR_WS_URL} />
-            <SettingRow label={env.PROPR_SELECTED_API_KEY_NAME} value={redactSecret(env.PROPR_API_KEY)} />
+            <SettingRow label="PROPR_API_URL" value={env.PROPR_API_URL} />
+            <SettingRow label="PROPR_WS_URL" value={env.PROPR_WS_URL} />
+            <SettingRow label="PROPR_API_KEY" value={redactSecret(env.PROPR_API_KEY)} />
             <SettingRow
               label={env.PROPR_SELECTED_ACCOUNT_ID_NAME}
               value={env.PROPR_SELECTED_ACCOUNT_ID ? redactIdentifier(env.PROPR_SELECTED_ACCOUNT_ID) : "unset"}
             />
-            <SettingRow label="PROPR_BETA_API_URL" value={env.PROPR_BETA_API_URL ?? "unset"} />
-            <SettingRow label="PROPR_LIVE_API_URL" value={env.PROPR_LIVE_API_URL ?? "unset"} />
             <SettingRow label="DATABASE_URL" value={env.DATABASE_URL} />
           </CardContent>
         </Card>
@@ -76,7 +73,7 @@ export default async function SettingsPage() {
           </CardHeader>
           <CardContent className="grid gap-3 md:grid-cols-3">
             <Policy label="Write path" value="Propr only" />
-            <Policy label="Active Propr env" value={readiness.activeEnv} />
+            <Policy label="Propr API" value="Live" />
             <Policy label="Authenticated" value={readiness.authenticated ? "Yes" : "No"} />
             <Policy label="Active challenges" value={String(readiness.activeChallengeCount)} />
             <Policy label="Selected account" value={readiness.selectedAccountId ?? "unset"} />

@@ -1,7 +1,6 @@
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import * as schema from "@/db/schema";
@@ -17,10 +16,6 @@ function resolveSqlitePath(databaseUrl: string): string {
     throw new Error("Only file: SQLite DATABASE_URL values are supported in V1.");
   }
   const filePath = databaseUrl.slice("file:".length);
-
-  if (process.env.VERCEL && !path.isAbsolute(filePath)) {
-    return path.join(os.tmpdir(), path.basename(filePath || "hl_grid_bot.sqlite"));
-  }
 
   return filePath;
 }

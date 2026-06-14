@@ -16,7 +16,7 @@ export function ChallengePanel({ challenge }: { challenge: ProprChallengeSummary
           <div>
             <CardTitle className="text-sm">Propr challenge</CardTitle>
             <div className="mt-1 text-xs text-muted-foreground">
-              {challenge.label} - {challenge.activeEnv === "live" ? "Live API" : "Beta API"}
+              {challenge.label} - Live API
             </div>
           </div>
           <div

@@ -1,13 +1,14 @@
-import { createProprClient, ProprAPIError, type ProprLeverageLimits } from "@/features/propr/client";
+import { accountIdMatches, createProprClient, ProprAPIError, type ProprLeverageLimits } from "@/features/propr/client";
 import { getEnv, redactSecret } from "@/lib/env";
+
+const DEFAULT_PROPR_API_URL = "https://api.propr.xyz/v1";
 
 export interface ProprLiveReadiness {
   checkedAt: string;
-  activeEnv: "beta" | "live";
   apiUrl: string;
   wsUrl: string;
   apiKey: string;
-  apiKeyName: "PROPR_BETA_API_KEY" | "PROPR_LIVE_API_KEY";
+  apiKeyName: "PROPR_API_KEY";
   health: {
     services: Record<string, string> | null;
     coreOk: boolean;
@@ -16,7 +17,7 @@ export interface ProprLiveReadiness {
   activeChallengeCount: number;
   activeAccountId?: string;
   selectedAccountId?: string;
-  selectedAccountIdName: "PROPR_BETA_ACCOUNT_ID" | "PROPR_LIVE_ACCOUNT_ID" | "PROPR_ACCOUNT_ID";
+  selectedAccountIdName: "PROPR_ACCOUNT_ID";
   leverageLimits: ProprLeverageLimits | null;
   liveEnabled: boolean;
   blockers: string[];
@@ -27,11 +28,10 @@ export async function checkProprLiveReadiness(): Promise<ProprLiveReadiness> {
   const env = getEnv();
   const readiness: ProprLiveReadiness = {
     checkedAt: new Date().toISOString(),
-    activeEnv: env.PROPR_ACTIVE_ENV,
     apiUrl: env.PROPR_API_URL,
     wsUrl: env.PROPR_WS_URL,
     apiKey: redactSecret(env.PROPR_API_KEY),
-    apiKeyName: env.PROPR_SELECTED_API_KEY_NAME,
+    apiKeyName: "PROPR_API_KEY",
     health: {
       services: null,
       coreOk: false,
@@ -43,11 +43,11 @@ export async function checkProprLiveReadiness(): Promise<ProprLiveReadiness> {
     leverageLimits: null,
     liveEnabled: false,
     blockers: [],
-    warnings: endpointWarnings(env.PROPR_ACTIVE_ENV, env.PROPR_API_URL, env.PROPR_API_KEY),
+    warnings: endpointWarnings(env.PROPR_API_URL, env.PROPR_API_KEY),
   };
 
   if (!env.PROPR_API_KEY) {
-    readiness.blockers.push(`${env.PROPR_SELECTED_API_KEY_NAME} is missing for active Propr ${env.PROPR_ACTIVE_ENV} mode.`);
+    readiness.blockers.push("PROPR_API_KEY is missing.");
     return readiness;
   }
 
@@ -84,8 +84,9 @@ export async function checkProprLiveReadiness(): Promise<ProprLiveReadiness> {
   try {
     const attempts = await client.getChallengeAttempts({ status: "active" });
     readiness.activeChallengeCount = attempts.length;
-    const selectedAttempt = env.PROPR_SELECTED_ACCOUNT_ID
-      ? attempts.find((attempt) => attempt.accountId === env.PROPR_SELECTED_ACCOUNT_ID)
+    const selectedAccountId = env.PROPR_SELECTED_ACCOUNT_ID;
+    const selectedAttempt = selectedAccountId
+      ? attempts.find((attempt) => accountIdMatches(attempt.accountId, selectedAccountId))
       : undefined;
     const activeAttempt = selectedAttempt ?? attempts[0];
     readiness.activeAccountId = activeAttempt?.accountId ? redactIdentifier(activeAttempt.accountId) : undefined;
@@ -113,16 +114,15 @@ export async function checkProprLiveReadiness(): Promise<ProprLiveReadiness> {
   return readiness;
 }
 
-function endpointWarnings(activeEnv: "beta" | "live", apiUrl: string, apiKey?: string): string[] {
+function endpointWarnings(apiUrl: string, apiKey?: string): string[] {
   const warnings: string[] = [];
-  const usesBetaUrl = apiUrl.includes("beta");
-  const isBetaKey = apiKey?.startsWith("pk_beta_") ?? false;
-  const isLiveKey = apiKey?.startsWith("pk_live_") ?? false;
 
-  if (activeEnv === "beta" && !usesBetaUrl) warnings.push("PROPR_ACTIVE_ENV is beta but the selected Propr URL does not look like beta.");
-  if (activeEnv === "live" && usesBetaUrl) warnings.push("PROPR_ACTIVE_ENV is live but the selected Propr URL looks like beta.");
-  if (usesBetaUrl && isLiveKey) warnings.push("Live key is configured against the beta Propr URL.");
-  if (!usesBetaUrl && isBetaKey) warnings.push("Beta key is configured against the live Propr URL.");
+  if (apiUrl !== DEFAULT_PROPR_API_URL) {
+    warnings.push("PROPR_API_URL is not the default Propr live URL.");
+  }
+  if (apiKey && !apiKey.startsWith("pk_live_")) {
+    warnings.push("PROPR_API_KEY does not look like a Propr live API key.");
+  }
 
   return warnings;
 }

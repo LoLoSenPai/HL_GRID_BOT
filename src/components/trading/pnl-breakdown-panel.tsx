@@ -30,12 +30,14 @@ export function PnlBreakdownPanel({
   asset,
   positionSide,
   gridProfit,
+  proprRealizedPnl,
   fees,
   funding = "0",
 }: {
   asset: MarketSymbol;
   positionSide: PositionSide;
   gridProfit: string;
+  proprRealizedPnl?: string;
   fees: string;
   funding?: string;
 }) {
@@ -70,6 +72,7 @@ export function PnlBreakdownPanel({
     const fundingFee = safeDecimal(funding);
     const currentTrendPnl = liveUnrealized.plus(fundingFee);
     const grid = safeDecimal(gridProfit);
+    const proprRealized = proprRealizedPnl ? safeDecimal(proprRealizedPnl) : null;
     const feeCost = safeDecimal(fees).abs();
     const trackedTotal = currentTrendPnl.plus(grid);
 
@@ -78,11 +81,12 @@ export function PnlBreakdownPanel({
       fundingFee,
       currentTrendPnl,
       grid,
+      proprRealized,
       feeCost,
       trackedTotal,
       matchingPositionCount: matchingPositions.length,
     };
-  }, [asset, fees, funding, gridProfit, positionSide, state?.positions]);
+  }, [asset, fees, funding, gridProfit, positionSide, proprRealizedPnl, state?.positions]);
 
   return (
     <div className="rounded-md border bg-background/50 p-3">
@@ -119,14 +123,15 @@ export function PnlBreakdownPanel({
           <span className="pt-1.5 text-muted-foreground">=</span>
           <FormulaValue label="Current trend PnL" value={breakdown.currentTrendPnl} />
           <span className="pt-1.5 text-muted-foreground">+</span>
-          <FormulaValue label="Grid profit" value={breakdown.grid} />
+          <FormulaValue label="Grid cycle PnL" value={breakdown.grid} />
         </div>
       </div>
 
       <div className="mt-3 space-y-1.5 text-xs">
         <BreakdownRow label="Live uPnL" value={breakdown.liveUnrealized} />
         <BreakdownRow label="Funding fee" value={breakdown.fundingFee} />
-        <BreakdownRow label="Grid profit" value={breakdown.grid} />
+        <BreakdownRow label="Grid cycle PnL" value={breakdown.grid} />
+        {breakdown.proprRealized ? <BreakdownRow label="Propr realized (merged)" value={breakdown.proprRealized} /> : null}
         <BreakdownRow label="Fees tracked" value={breakdown.feeCost.neg()} muted />
       </div>
 
@@ -134,7 +139,7 @@ export function PnlBreakdownPanel({
         {breakdown.matchingPositionCount > 0
           ? `${breakdown.matchingPositionCount} matching Propr position${breakdown.matchingPositionCount > 1 ? "s" : ""}.`
           : "No matching open Propr position yet."}{" "}
-        Fees are shown for control and are not subtracted twice from Propr PnL.
+        Cycle PnL is paired by grid band; Propr realized is shown separately because positions are merged.
       </div>
 
       {state?.reason ? (

@@ -1,0 +1,49 @@
+services:
+  app:
+    build:
+      context: .
+    image: hl-grid-bot:prod
+    init: true
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      DATABASE_URL: file:/app/data/hl_grid_bot.sqlite
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    volumes:
+      - ./data:/app/data
+    command: ["npm", "run", "start", "--", "--hostname", "0.0.0.0"]
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    image: hl-grid-bot:prod
+    build:
+      context: .
+    init: true
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      DATABASE_URL: file:/app/data/hl_grid_bot.sqlite
+      PROPR_WORKER_INTERVAL_MS: "${PROPR_WORKER_INTERVAL_MS:-10000}"
+    volumes:
+      - ./data:/app/data
+    command: ["npm", "run", "worker:propr"]
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
