@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { redirectResponse } from "@/lib/auth/redirect";
 import { AUTH_COOKIE_NAME, isAuthConfigured, isAuthDisabled, verifySessionToken } from "@/lib/auth/session";
 
 const PUBLIC_PATHS = new Set(["/login", "/api/auth/login", "/api/auth/logout", "/api/health", "/favicon.ico"]);
@@ -20,12 +21,7 @@ export async function proxy(request: NextRequest) {
 
   const loginParams = new URLSearchParams({ next: `${pathname}${search}` });
   if (!isAuthConfigured()) loginParams.set("error", "config");
-  return new NextResponse(null, {
-    status: 307,
-    headers: {
-      Location: `/login?${loginParams.toString()}`,
-    },
-  });
+  return redirectResponse(request, `/login?${loginParams.toString()}`, 307);
 }
 
 export const config = {

@@ -1,5 +1,6 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { type NextRequest } from "next/server";
 
+import { redirectResponse } from "@/lib/auth/redirect";
 import { AUTH_COOKIE_NAME, AUTH_MAX_AGE_SECONDS, createSessionToken, safeNextPath, validateCredentials } from "@/lib/auth/session";
 
 export const dynamic = "force-dynamic";
@@ -12,10 +13,10 @@ export async function POST(request: NextRequest) {
 
   if (!(await validateCredentials(username, password))) {
     const loginParams = new URLSearchParams({ error: "invalid", next: nextPath });
-    return redirectTo(`/login?${loginParams.toString()}`);
+    return redirectResponse(request, `/login?${loginParams.toString()}`);
   }
 
-  const response = redirectTo(nextPath);
+  const response = redirectResponse(request, nextPath);
   response.cookies.set(AUTH_COOKIE_NAME, await createSessionToken(username), {
     httpOnly: true,
     sameSite: "lax",
@@ -24,15 +25,6 @@ export async function POST(request: NextRequest) {
     maxAge: AUTH_MAX_AGE_SECONDS,
   });
   return response;
-}
-
-function redirectTo(path: string): NextResponse {
-  return new NextResponse(null, {
-    status: 303,
-    headers: {
-      Location: path,
-    },
-  });
 }
 
 function isSecureRequest(request: NextRequest): boolean {
