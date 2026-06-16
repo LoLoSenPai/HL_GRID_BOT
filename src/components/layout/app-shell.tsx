@@ -5,6 +5,7 @@ import { useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
+  BookOpenText,
   Bot,
   FlaskConical,
   Gauge,
@@ -25,6 +26,7 @@ const navItems = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/bots", label: "Bots", icon: Bot },
   { href: "/grid-terminal", label: "Grid Terminal", icon: SquareTerminal },
+  { href: "/how-it-works", label: "Guide", icon: BookOpenText },
   { href: "/lab", label: "Lab", icon: FlaskConical },
   { href: "/activity", label: "Activity", icon: Activity },
   { href: "/settings", label: "Settings", icon: Settings },
