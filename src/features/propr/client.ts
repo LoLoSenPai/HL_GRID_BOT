@@ -119,6 +119,12 @@ export interface ProprAccount {
   dayStartEquity?: string;
   dailyStartEquity?: string;
   startOfDayEquity?: string;
+  dailyEquityStart?: string;
+  dailyStartingEquity?: string;
+  dailyLossUsed?: string;
+  dailyLoss?: string;
+  maxDailyLossUsed?: string;
+  currentDailyLoss?: string;
   totalInitialMargin?: string;
   totalMaintenanceMargin?: string;
 }

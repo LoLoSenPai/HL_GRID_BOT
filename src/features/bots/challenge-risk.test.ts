@@ -26,6 +26,7 @@ const challenge: ProprChallengeSummary = {
   profitProgressPct: "0",
   dailyLossLimit: "150",
   dayStartEquity: "5000",
+  dailyLossUsed: "0",
   dailyLossUsedPct: "0",
   drawdownLimit: "4700",
   drawdownUsedPct: "0",

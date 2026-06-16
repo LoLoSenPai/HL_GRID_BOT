@@ -109,7 +109,7 @@ function dailySafetyStop(challenge: ProprChallengeSummary): {
   const stopAmount = decimal(challenge.startingBalance).mul("2.75").div(100);
   const floor = decimal(challenge.dayStartEquity).minus(stopAmount);
   const remaining = decimal(challenge.equity).minus(floor);
-  const used = decimal(challenge.dayStartEquity).minus(challenge.equity);
+  const used = decimal(challenge.dailyLossUsed);
   const usedPct = stopAmount.gt(0) ? used.div(stopAmount).mul(100) : decimal(0);
 
   return {

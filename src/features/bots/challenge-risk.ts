@@ -71,10 +71,7 @@ export function buildChallengeRiskPreflight(input: {
   const dailyStopPct = decimal(input.config.challengeDailyLossStopPct ?? "2.75");
   const dailyStopAmount = decimal(input.challenge.startingBalance).mul(dailyStopPct).div(100);
   const dailyStopFloor = decimal(input.challenge.dayStartEquity).minus(dailyStopAmount);
-  const dailyLossUsed = DecimalMax(
-    decimal(0),
-    decimal(input.challenge.dayStartEquity).minus(input.challenge.equity),
-  );
+  const dailyLossUsed = DecimalMax(decimal(0), decimal(input.challenge.dailyLossUsed));
   const dailyRemaining = DecimalMax(decimal(0), dailyStopAmount.minus(dailyLossUsed));
   const dailyStopUsedPct = dailyStopAmount.gt(0) ? dailyLossUsed.div(dailyStopAmount).mul(100) : decimal(0);
   const drawdownBudget = decimal(input.challenge.highWaterMark).minus(input.challenge.drawdownLimit);

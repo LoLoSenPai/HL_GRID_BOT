@@ -9,6 +9,7 @@ import {
 } from "@/domain/propr-rules";
 import type { RuntimeMetrics } from "@/domain/types";
 import { createProprClient, type ProprAccount, type ProprChallengeAttempt } from "@/features/propr/client";
+import { resolveDailyEquityBaseline } from "@/features/propr/daily-equity-baseline";
 import { getEnv } from "@/lib/env";
 import { logger } from "@/lib/logger";
 
@@ -30,6 +31,7 @@ export interface ProprChallengeSummary {
   profitProgressPct: string;
   dailyLossLimit: string;
   dayStartEquity: string;
+  dailyLossUsed: string;
   dailyLossUsedPct: string;
   drawdownLimit: string;
   drawdownUsedPct: string;
@@ -80,7 +82,24 @@ function buildSummaryFromPropr(
     decimal(balance).plus(unrealizedPnl).plus(account.isolatedPositionMargin ?? "0").toString(),
   );
   const highWaterMark = pickString(account.highWaterMark, Decimal.max(equity, startingBalance).toString());
-  const dayStartEquity = pickString(account.dayStartEquity, account.dailyStartEquity, account.startOfDayEquity, startingBalance);
+  const dailyBaseline = resolveDailyEquityBaseline({
+    accountId: account.accountId ?? attempt.accountId,
+    equity,
+    providedDayStartEquity: pickOptionalString(
+      account.dayStartEquity,
+      account.dailyStartEquity,
+      account.startOfDayEquity,
+      account.dailyEquityStart,
+      account.dailyStartingEquity,
+    ),
+  });
+  const dailyLossUsed = pickString(
+    account.dailyLossUsed,
+    account.dailyLoss,
+    account.maxDailyLossUsed,
+    account.currentDailyLoss,
+    dailyBaseline.dailyLossUsed,
+  );
   const realizedPnl = pickString(
     attempt.totalPnl,
     attempt.totalProfitLoss,
@@ -100,7 +119,8 @@ function buildSummaryFromPropr(
     realizedPnl,
     unrealizedPnl,
     availableBalance: account.availableBalance,
-    dayStartEquity,
+    dayStartEquity: dailyBaseline.dayStartEquity,
+    dailyLossUsed,
     highWaterMark,
   });
 }
@@ -123,6 +143,7 @@ function localFallbackSummary(
     realizedPnl: "0",
     unrealizedPnl: "0",
     dayStartEquity: equity,
+    dailyLossUsed: "0",
     highWaterMark: Decimal.max(equity, startingBalance).toString(),
     warning,
   });
@@ -141,12 +162,16 @@ function buildSummary(input: {
   unrealizedPnl: string;
   availableBalance?: string;
   dayStartEquity: string;
+  dailyLossUsed?: string;
   highWaterMark: string;
   warning?: string;
 }): ProprChallengeSummary {
   const profitTarget = computeProfitTarget(input.startingBalance, input.ruleSet);
   const dailyLossLimit = computeDailyLossLimit(input.startingBalance, input.ruleSet);
   const drawdownLimit = computeDrawdownLimit(input.startingBalance, input.highWaterMark, input.ruleSet);
+  const dailyLossUsed = input.dailyLossUsed
+    ? Decimal.max(0, decimal(input.dailyLossUsed))
+    : Decimal.max(0, decimal(input.dayStartEquity).minus(input.equity));
 
   return {
     source: input.source,
@@ -166,7 +191,8 @@ function buildSummary(input: {
     profitProgressPct: signedPct(decimal(input.equity).minus(input.startingBalance), input.startingBalance),
     dailyLossLimit: formatUsd(dailyLossLimit),
     dayStartEquity: formatUsd(input.dayStartEquity),
-    dailyLossUsedPct: boundedPct(Decimal.max(0, decimal(input.dayStartEquity).minus(input.equity)), dailyLossLimit),
+    dailyLossUsed: toDecimalString(dailyLossUsed, 2),
+    dailyLossUsedPct: boundedPct(dailyLossUsed, dailyLossLimit),
     drawdownLimit: formatUsd(drawdownLimit),
     drawdownUsedPct: boundedPct(
       Decimal.max(0, decimal(input.highWaterMark).minus(input.equity)),
@@ -200,6 +226,10 @@ function formatUsd(value: string): string {
 
 function pickString(...values: Array<string | null | undefined>): string {
   return values.find((value) => value !== undefined && value !== null && value !== "") ?? "0";
+}
+
+function pickOptionalString(...values: Array<string | null | undefined>): string | undefined {
+  return values.find((value): value is string => value !== undefined && value !== null && value !== "");
 }
 
 function redactIdentifier(value?: string): string | undefined {

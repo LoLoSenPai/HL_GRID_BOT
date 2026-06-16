@@ -15,7 +15,6 @@ export function ReactiveChallengeTicker({
   const challenge = snapshot?.challenge ?? initialChallenge;
   const netPnl = challengeNetPnl(challenge);
   const toTarget = positiveDifference(challenge.profitTarget, netPnl);
-  const dailyLossUsed = lossUsed(challenge.dayStartEquity, challenge.equity);
   const drawdownPct = drawdownPctOfStartingBalance(challenge);
   const sourceLabel = challenge.source === "propr_live" ? "Live API" : "Fallback";
   const profitTone = Number(challenge.profitProgressPct) < 0 ? "down" : "up";
@@ -35,7 +34,7 @@ export function ReactiveChallengeTicker({
         <TickerMetric label="Equity" value={`$${challenge.equity}`} />
         <TickerMetric label="Available" value={challenge.availableBalance ? `$${challenge.availableBalance}` : "n/a"} tone="up" />
         <TickerMetric label="Drawdown Used" value={`${drawdownPct}% / ${challenge.ruleSet.maxDrawdownPct}%`} />
-        <TickerMetric label="Daily Loss" value={`$${dailyLossUsed} / $${challenge.dailyLossLimit}`} />
+        <TickerMetric label="Daily Loss" value={`$${challenge.dailyLossUsed} / $${challenge.dailyLossLimit}`} />
         <TickerMetric label="Profit Target" value={`${challenge.profitProgressPct}% / ${challenge.ruleSet.profitTargetPct}%`} tone={profitTone} />
         <TickerMetric label="To Target" value={`$${toTarget}`} tone="up" />
         <ProgressChip label="Daily" value={challenge.dailyLossUsedPct} />
@@ -101,15 +100,6 @@ function drawdownPctOfStartingBalance(challenge: ProprChallengeSummary): string 
     const used = decimal(challenge.highWaterMark).minus(challenge.equity);
     const positiveUsed = used.gt(0) ? used : decimal(0);
     return toDecimalString(positiveUsed.div(challenge.startingBalance).mul(100), 2);
-  } catch {
-    return "0";
-  }
-}
-
-function lossUsed(reference: string, current: string): string {
-  try {
-    const difference = decimal(reference).minus(current);
-    return toDecimalString(difference.gt(0) ? difference : 0, 2);
   } catch {
     return "0";
   }
