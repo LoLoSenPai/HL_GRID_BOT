@@ -34,7 +34,7 @@ const challenge: ProprChallengeSummary = {
 };
 
 describe("challenge risk preflight", () => {
-  it("blocks oversized configs and recommends lower capital", () => {
+  it("warns on oversized configs and recommends lower capital", () => {
     const preflight = buildChallengeRiskPreflight({
       config: {
         ...defaultBotConfig,
@@ -50,7 +50,9 @@ describe("challenge risk preflight", () => {
       committedBots: [],
     });
 
-    expect(preflight.status).toBe("blocked");
+    expect(preflight.status).toBe("warning");
+    expect(preflight.blockers).toEqual([]);
+    expect(preflight.warnings[0]).toContain("exceeds remaining challenge risk budget");
     expect(Number(preflight.candidateWorstCase)).toBeGreaterThan(150);
     expect(Number(preflight.recommendedCapitalAllocation)).toBeLessThan(2500);
   });
@@ -73,5 +75,6 @@ describe("challenge risk preflight", () => {
 
     expect(preflight.status).toBe("pass");
     expect(preflight.blockers).toEqual([]);
+    expect(preflight.warnings).toEqual([]);
   });
 });

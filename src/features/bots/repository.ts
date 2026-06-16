@@ -1782,7 +1782,7 @@ async function syncTradesForPlacedOrders(
 
 async function assertChallengeRiskBudget(botId: string, config: GridConfig) {
   const preflight = await getChallengeRiskPreflightForConfig(config, botId);
-  if (preflight.status !== "pass") {
+  if (preflight.status === "blocked" || preflight.status === "invalid") {
     throw new Error(preflight.blockers[0] ?? "Challenge risk preflight failed.");
   }
 }

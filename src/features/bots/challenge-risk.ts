@@ -8,7 +8,7 @@ const RECOMMENDED_BUDGET_USE = "0.9";
 
 export interface ChallengeRiskPreflight {
   checkedAt: string;
-  status: "pass" | "blocked" | "invalid";
+  status: "pass" | "warning" | "blocked" | "invalid";
   source: ProprChallengeSummary["source"];
   candidateWorstCase: string;
   candidateLossToStop: string;
@@ -35,6 +35,7 @@ export interface ChallengeRiskPreflight {
   recommendedSpacingMinPct: string;
   recommendedBudgetUsePct: string;
   blockers: string[];
+  warnings: string[];
 }
 
 export function buildChallengeRiskPreflight(input: {
@@ -46,6 +47,7 @@ export function buildChallengeRiskPreflight(input: {
   markPrices?: Partial<Record<string, string>>;
 }): ChallengeRiskPreflight {
   const blockers: string[] = [];
+  const warnings: string[] = [];
   const candidateRisk = estimateGridRisk(input.config, input.markPrice);
   const recommendedSizing = estimatePerpGridSizing({
     totalCapital: input.challenge.startingBalance,
@@ -94,15 +96,22 @@ export function buildChallengeRiskPreflight(input: {
   if (!remainingBudget.gt(0)) {
     blockers.push("No remaining challenge risk budget is available.");
   }
-  if (candidateWorstCase.gt(remainingBudget)) {
-    blockers.push(
+  if (remainingBudget.gt(0) && candidateWorstCase.gt(remainingBudget)) {
+    warnings.push(
       `Bot worst-case risk ${toDecimalString(candidateWorstCase, 2)} USDC exceeds remaining challenge risk budget ${toDecimalString(remainingBudget, 2)} USDC.`,
     );
   }
+  const status = blockers.length
+    ? candidateWorstCase.gt(0)
+      ? "blocked"
+      : "invalid"
+    : warnings.length
+      ? "warning"
+      : "pass";
 
   return {
     checkedAt: new Date().toISOString(),
-    status: blockers.length ? (candidateWorstCase.gt(0) ? "blocked" : "invalid") : "pass",
+    status,
     source: input.challenge.source,
     candidateWorstCase: toDecimalString(candidateWorstCase, 2),
     candidateLossToStop: candidateRisk.lossToStop,
@@ -134,6 +143,7 @@ export function buildChallengeRiskPreflight(input: {
     recommendedSpacingMinPct: recommendedSizing.spacingMinPct,
     recommendedBudgetUsePct: toDecimalString(decimal(RECOMMENDED_BUDGET_USE).mul(100), 0),
     blockers,
+    warnings,
   };
 }
 

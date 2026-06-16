@@ -37,7 +37,7 @@ import { cn } from "@/lib/utils";
 import { useTerminalStore } from "@/store/use-terminal-store";
 
 interface ChallengeRiskPreflight {
-  status: "pass" | "blocked" | "invalid";
+  status: "pass" | "warning" | "blocked" | "invalid";
   candidateWorstCase: string;
   candidateLossToStop: string;
   candidateStopBuffer: string;
@@ -62,6 +62,7 @@ interface ChallengeRiskPreflight {
   recommendedSpacingMinPct: string;
   recommendedBudgetUsePct: string;
   blockers: string[];
+  warnings: string[];
 }
 
 interface ActiveChallengeBotSummary {
@@ -246,10 +247,19 @@ function ChallengeRiskPreflightPanel({
             "rounded-md border px-2 py-1 text-xs font-medium",
             !preflight && "border-muted-foreground/30 text-muted-foreground",
             preflight?.status === "pass" && "border-primary/30 bg-primary/10 text-primary",
-            preflight?.status !== "pass" && preflight && "border-destructive/30 bg-destructive/10 text-destructive",
+            preflight?.status === "warning" && "border-amber-300/40 bg-amber-300/10 text-amber-100",
+            preflight &&
+              (preflight.status === "blocked" || preflight.status === "invalid") &&
+              "border-destructive/30 bg-destructive/10 text-destructive",
           )}
         >
-          {preflight ? (preflight.status === "pass" ? "PASS" : "BLOCKED") : "SYNCING"}
+          {preflight
+            ? preflight.status === "pass"
+              ? "PASS"
+              : preflight.status === "warning"
+                ? "WARN"
+                : "BLOCKED"
+            : "SYNCING"}
         </div>
       </div>
 
@@ -305,6 +315,9 @@ function ChallengeRiskPreflightPanel({
           <span className="metric-mono text-foreground">{preflight?.recommendedSpacingMinPct ?? "..."}%</span>
         </div>
         {preflight?.blockers[0] ? <div className="mt-1 text-destructive">{preflight.blockers[0]}</div> : null}
+        {!preflight?.blockers[0] && preflight?.warnings[0] ? (
+          <div className="mt-1 text-amber-100">{preflight.warnings[0]}</div>
+        ) : null}
       </div>
 
       {canApplySafeCapital ? (
@@ -519,7 +532,7 @@ function DeployPreviewModal({
   if (!open) return null;
 
   const account = challenge?.accountId ?? "No account synced";
-  const canConfirm = preflight?.status === "pass" && !pending;
+  const canConfirm = (preflight?.status === "pass" || preflight?.status === "warning") && !pending;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
@@ -573,6 +586,9 @@ function DeployPreviewModal({
             floor.
           </div>
           {preflight?.blockers[0] ? <div className="mt-2 text-destructive">{preflight.blockers[0]}</div> : null}
+          {!preflight?.blockers[0] && preflight?.warnings[0] ? (
+            <div className="mt-2 text-amber-100">{preflight.warnings[0]}</div>
+          ) : null}
         </div>
 
         <div className="flex flex-wrap justify-end gap-2 p-4">
@@ -636,9 +652,10 @@ export function GridConfigPanel({
   );
   const preview = estimateGridPreview(challengeConfig);
   const livePreflightIssue =
-    challengePreflight?.status !== "pass"
+    challengePreflight?.status === "blocked" || challengePreflight?.status === "invalid"
       ? challengePreflight?.blockers[0] ?? "Challenge risk preflight is still syncing."
       : null;
+  const livePreflightWarning = challengePreflight?.status === "warning" ? challengePreflight.warnings[0] : null;
 
   const patch = (patchValue: Partial<GridConfig>) => updateConfig({ ...patchValue, mode: "propr_live" });
   const canSubmit = !blockingIssues.length && !liveNeedsAcknowledgement && !livePreflightIssue && !pending;
@@ -926,7 +943,7 @@ export function GridConfigPanel({
           <Switch checked={liveModeAcknowledged} onCheckedChange={acknowledgeLiveMode} />
         </div>
 
-        {blockingIssues.length || liveNeedsAcknowledgement || actionError ? (
+        {blockingIssues.length || liveNeedsAcknowledgement || livePreflightIssue || actionError ? (
           <Alert variant="destructive">
             <AlertTriangle className="size-4" />
             <AlertTitle>Execution blocked</AlertTitle>
@@ -941,12 +958,15 @@ export function GridConfigPanel({
 
         {!liveNeedsAcknowledgement && !blockingIssues.length && !livePreflightIssue && !actionError ? (
           <Alert>
-            <Rocket className="size-4" />
-            <AlertTitle>{activeBot ? "Ready to deploy another bot" : "Ready to deploy"}</AlertTitle>
+            {livePreflightWarning ? <AlertTriangle className="size-4" /> : <Rocket className="size-4" />}
+            <AlertTitle>
+              {livePreflightWarning ? "Ready with risk warning" : activeBot ? "Ready to deploy another bot" : "Ready to deploy"}
+            </AlertTitle>
             <AlertDescription>
-              {activeBot
+              {livePreflightWarning ??
+              (activeBot
                 ? "A challenge bot is already active. The preview will re-check remaining risk before sending more entry orders."
-                : "This deploys the bot on the active Propr challenge. It opens the initial grid inventory and places both rebuy and reduce-only ladder orders."}
+                : "This deploys the bot on the active Propr challenge. It opens the initial grid inventory and places both rebuy and reduce-only ladder orders.")}
             </AlertDescription>
           </Alert>
         ) : null}
