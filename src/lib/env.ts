@@ -19,27 +19,48 @@ export type AppEnv = ParsedEnv & {
   PROPR_API_URL: string;
   PROPR_WS_URL: string;
   PROPR_SELECTED_ACCOUNT_ID?: string;
-  PROPR_SELECTED_ACCOUNT_ID_NAME: "PROPR_ACCOUNT_ID";
+  PROPR_SELECTED_ACCOUNT_ID_NAME: string;
 };
 
 export function getEnv(): AppEnv {
+  return getProprEnvForUser();
+}
+
+export function getProprEnvForUser(ownerUser?: string): AppEnv {
   const env = envSchema.parse(process.env);
+  const suffix = ownerUser ? envSuffixForUser(ownerUser) : undefined;
+  const scopedAccountId = readUserScopedEnv("PROPR_ACCOUNT_ID", suffix);
+  const apiKey = readUserScopedEnv("PROPR_API_KEY", suffix) ?? env.PROPR_API_KEY;
+  const apiUrl = readUserScopedEnv("PROPR_API_URL", suffix) ?? env.PROPR_API_URL ?? DEFAULT_PROPR_API_URL;
+  const wsUrl = readUserScopedEnv("PROPR_WS_URL", suffix) ?? env.PROPR_WS_URL ?? DEFAULT_PROPR_WS_URL;
+  const selectedAccountId = scopedAccountId ?? env.PROPR_ACCOUNT_ID;
 
   return {
     ...env,
-    PROPR_API_URL: env.PROPR_API_URL ?? DEFAULT_PROPR_API_URL,
-    PROPR_WS_URL: env.PROPR_WS_URL ?? DEFAULT_PROPR_WS_URL,
-    PROPR_SELECTED_ACCOUNT_ID: env.PROPR_ACCOUNT_ID,
-    PROPR_SELECTED_ACCOUNT_ID_NAME: "PROPR_ACCOUNT_ID",
+    PROPR_API_KEY: apiKey,
+    PROPR_API_URL: apiUrl,
+    PROPR_WS_URL: wsUrl,
+    PROPR_SELECTED_ACCOUNT_ID: selectedAccountId,
+    PROPR_SELECTED_ACCOUNT_ID_NAME: suffix && scopedAccountId ? `PROPR_ACCOUNT_ID_${suffix}` : "PROPR_ACCOUNT_ID",
   };
 }
 
-export function hasProprCredentials(): boolean {
-  return Boolean(getEnv().PROPR_API_KEY);
+export function hasProprCredentials(ownerUser?: string): boolean {
+  return Boolean(getProprEnvForUser(ownerUser).PROPR_API_KEY);
 }
 
 export function redactSecret(value?: string): string {
   if (!value) return "missing";
   if (value.length <= 8) return "set";
   return `${value.slice(0, 8)}...`;
+}
+
+export function envSuffixForUser(ownerUser: string): string {
+  return ownerUser.trim().toUpperCase().replace(/[^A-Z0-9]+/gu, "_");
+}
+
+function readUserScopedEnv(key: string, suffix?: string): string | undefined {
+  if (!suffix) return undefined;
+  const value = process.env[`${key}_${suffix}`]?.trim();
+  return value || undefined;
 }

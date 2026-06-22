@@ -1,4 +1,5 @@
 import { getSqlite } from "@/db/client";
+import { getDefaultBotOwnerUser } from "@/lib/auth/session";
 
 let initialized = false;
 
@@ -10,13 +11,13 @@ export function ensureDatabase() {
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       status TEXT NOT NULL,
+      owner_user TEXT NOT NULL DEFAULT 'loic',
       mode TEXT NOT NULL,
       pair TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS bots_status_idx ON bots(status);
-
     CREATE TABLE IF NOT EXISTS bot_configs (
       id TEXT PRIMARY KEY,
       bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
@@ -139,8 +140,14 @@ export function ensureDatabase() {
 
   ensureColumn("bot_configs", "position_side", "TEXT NOT NULL DEFAULT 'long'");
   ensureColumn("bot_configs", "challenge_daily_loss_stop_pct", "TEXT NOT NULL DEFAULT '2.75'");
+  ensureColumn("bots", "owner_user", `TEXT NOT NULL DEFAULT ${quoteSqlString(getDefaultBotOwnerUser())}`);
+  getSqlite().exec("CREATE INDEX IF NOT EXISTS bots_owner_status_idx ON bots(owner_user, status)");
 
   initialized = true;
+}
+
+function quoteSqlString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
 }
 
 export function resetDatabaseInitializationForTests() {

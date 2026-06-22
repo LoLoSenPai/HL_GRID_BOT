@@ -16,6 +16,10 @@ PROPR_ACCOUNT_ID=HRjAbEbasfZ1
 APP_AUTH_USERNAME=loic
 APP_AUTH_PASSWORD=
 APP_AUTH_SECRET=
+# Pour plusieurs utilisateurs:
+# APP_AUTH_USERS=loic:mot-de-passe-loic,marty4k:mot-de-passe-marty
+# PROPR_API_KEY_MARTY4K=
+# PROPR_ACCOUNT_ID_MARTY4K=
 
 DATABASE_URL=file:/app/data/hl_grid_bot.sqlite
 PROPR_WORKER_INTERVAL_MS=10000
@@ -29,8 +33,15 @@ APP_PORT=3000
 `PROPR_API_KEY` ne doit jamais etre prefixe par `NEXT_PUBLIC_`. Un exemple sans secret est disponible dans
 `env.EXAMPLE`.
 
-`APP_AUTH_PASSWORD` protege l'interface web. `APP_AUTH_SECRET` sert a signer le cookie de session et doit faire au moins
-32 caracteres. Sur le VPS:
+`APP_AUTH_PASSWORD` protege l'interface web en mode utilisateur unique. Pour donner un acces au tradeur, utiliser plutot
+`APP_AUTH_USERS` avec une entree par utilisateur, par exemple `loic:...` et `marty4k:...`. Si `APP_AUTH_USERS` est
+defini, il remplace `APP_AUTH_USERNAME` / `APP_AUTH_PASSWORD`.
+
+Chaque utilisateur peut avoir ses propres credentials Propr avec un suffixe base sur le login en majuscules:
+`PROPR_API_KEY_MARTY4K`, `PROPR_ACCOUNT_ID_MARTY4K`, optionnellement `PROPR_API_URL_MARTY4K` et
+`PROPR_WS_URL_MARTY4K`. Sans variable suffixee, l'app retombe sur `PROPR_API_KEY` et `PROPR_ACCOUNT_ID`.
+
+`APP_AUTH_SECRET` sert a signer le cookie de session et doit faire au moins 32 caracteres. Sur le VPS:
 
 ```bash
 openssl rand -base64 24
@@ -87,7 +98,7 @@ cd ~/bots
 git clone https://github.com/LoLoSenPai/HL_GRID_BOT.git hl-grid-bot
 cd hl-grid-bot
 cp env.EXAMPLE .env
-# Renseigner PROPR_API_KEY, PROPR_ACCOUNT_ID, APP_AUTH_PASSWORD et APP_AUTH_SECRET
+# Renseigner PROPR_API_KEY, PROPR_ACCOUNT_ID, APP_AUTH_USERS et APP_AUTH_SECRET
 docker compose -f docker-compose.prod.yml up --build -d
 curl http://127.0.0.1:3000/api/health
 docker compose -f docker-compose.prod.yml logs -f app worker

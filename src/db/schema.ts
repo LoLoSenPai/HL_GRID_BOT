@@ -6,6 +6,7 @@ export const bots = sqliteTable(
     id: text("id").primaryKey(),
     name: text("name").notNull(),
     status: text("status").notNull(),
+    ownerUser: text("owner_user").notNull().default("loic"),
     mode: text("mode").notNull(),
     pair: text("pair").notNull(),
     createdAt: text("created_at").notNull(),
@@ -13,6 +14,7 @@ export const bots = sqliteTable(
   },
   (table) => ({
     statusIdx: index("bots_status_idx").on(table.status),
+    ownerStatusIdx: index("bots_owner_status_idx").on(table.ownerUser, table.status),
   }),
 );
 

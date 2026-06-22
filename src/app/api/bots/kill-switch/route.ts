@@ -1,8 +1,12 @@
 import { NextResponse } from "next/server";
 
 import { triggerProprEmergencyStop } from "@/features/bots/repository";
+import { getCurrentUser } from "@/lib/auth/current-user";
 
 export async function POST(request: Request) {
+  const user = await getCurrentUser();
+  if (!user) return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+
   let reason = "Manual kill switch";
 
   try {
@@ -13,7 +17,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const summary = await triggerProprEmergencyStop(reason);
+    const summary = await triggerProprEmergencyStop(reason, user);
     return NextResponse.json({ data: summary });
   } catch (error) {
     return NextResponse.json(

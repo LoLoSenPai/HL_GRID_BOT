@@ -21,16 +21,18 @@ import { ensureDatabase } from "@/db/init";
 import { defaultBotConfig } from "@/features/bots/sample-data";
 import { buildChallengeRiskPreflight, type ChallengeRiskPreflight } from "@/features/bots/challenge-risk";
 import { PaperGridEngine } from "@/features/paper-trading/engine";
-import { ProprExecutionAdapter } from "@/features/execution/propr-adapter";
+import { createProprExecutionAdapter, ProprExecutionAdapter } from "@/features/execution/propr-adapter";
 import type { ExecutionOrder, ExecutionPosition } from "@/features/execution/types";
 import { getMarketSnapshots } from "@/features/market-data/service";
 import { getProprChallengeSummary, type ProprChallengeSummary } from "@/features/propr/challenge-summary";
 import { checkProprLiveReadiness } from "@/features/propr/readiness";
+import { getDefaultBotOwnerUser } from "@/lib/auth/session";
 
 interface BotJoinedRow {
   id: string;
   name: string;
   status: BotStatus;
+  owner_user: string;
   mode: TradingMode;
   pair: MarketSymbol;
   created_at: string;
@@ -120,6 +122,7 @@ export interface BotRuntimeState {
 
 export interface PaperReconciliationOptions {
   botId?: string;
+  ownerUser?: string;
   markPrices?: Partial<Record<MarketSymbol, string>>;
   emitEvents?: boolean;
 }
@@ -197,37 +200,37 @@ function removeLegacySampleBots() {
   });
 }
 
-export function listBots(): Bot[] {
+export function listBots(ownerUser?: string): Bot[] {
   bootstrapBots();
-  const rows = getSqlite()
-    .prepare(
-      `
+  const sql = `
       SELECT b.*, c.lower_price, c.upper_price, c.grid_count, c.capital_allocation,
         c.position_side, c.leverage, c.spacing, c.order_size, c.take_profit, c.stop_loss,
         c.max_drawdown_pct, c.challenge_daily_loss_stop_pct, c.auto_pause_out_of_range, c.auto_recenter
       FROM bots b
       JOIN bot_configs c ON c.bot_id = b.id
+      ${ownerUser ? "WHERE b.owner_user = ?" : ""}
       ORDER BY b.updated_at DESC
-    `,
-    )
-    .all() as BotJoinedRow[];
+    `;
+  const rows = ownerUser
+    ? (getSqlite().prepare(sql).all(ownerUser) as BotJoinedRow[])
+    : (getSqlite().prepare(sql).all() as BotJoinedRow[]);
   return rows.map(mapBot);
 }
 
-export function getBot(id: string): Bot | null {
+export function getBot(id: string, ownerUser?: string): Bot | null {
   bootstrapBots();
-  const row = getSqlite()
-    .prepare(
-      `
+  const sql = `
       SELECT b.*, c.lower_price, c.upper_price, c.grid_count, c.capital_allocation,
         c.position_side, c.leverage, c.spacing, c.order_size, c.take_profit, c.stop_loss,
         c.max_drawdown_pct, c.challenge_daily_loss_stop_pct, c.auto_pause_out_of_range, c.auto_recenter
       FROM bots b
       JOIN bot_configs c ON c.bot_id = b.id
       WHERE b.id = ?
-    `,
-    )
-    .get(id) as BotJoinedRow | undefined;
+      ${ownerUser ? "AND b.owner_user = ?" : ""}
+    `;
+  const row = getSqlite()
+    .prepare(sql)
+    .get(...(ownerUser ? [id, ownerUser] : [id])) as BotJoinedRow | undefined;
   return row ? mapBot(row) : null;
 }
 
@@ -239,7 +242,7 @@ export function getBotRuntimeState(id: string): BotRuntimeState | null {
   return row ? mapRuntimeState(row) : null;
 }
 
-export function createBot(name: string, config: GridConfig = defaultBotConfig): Bot {
+export function createBot(name: string, config: GridConfig = defaultBotConfig, ownerUser = getDefaultBotOwnerUser()): Bot {
   bootstrapBots();
   const issues = validateBotConfig(config).filter((issue) => issue.severity === "error");
   if (issues.length) throw new Error(issues[0].message);
@@ -247,7 +250,7 @@ export function createBot(name: string, config: GridConfig = defaultBotConfig): 
   const id = `bot_${ulid().toLowerCase()}`;
   const now = new Date().toISOString();
   const tx = getSqlite().transaction(() => {
-    insertBotRows(name, config, id, "draft", now);
+    insertBotRows(name, config, id, "draft", now, ownerUser);
     addEvent({
       botId: id,
       type: "bot.created",
@@ -257,28 +260,29 @@ export function createBot(name: string, config: GridConfig = defaultBotConfig): 
     });
   });
   tx();
-  const bot = getBot(id);
+  const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Created bot was not found.");
   return bot;
 }
 
-export function duplicateBot(id: string): Bot {
-  const bot = getBot(id);
+export function duplicateBot(id: string, ownerUser?: string): Bot {
+  const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Bot not found.");
-  return createBot(`${bot.name} Copy`, bot.config);
+  return createBot(`${bot.name} Copy`, bot.config, bot.ownerUser);
 }
 
 export function createLiveCandidate(
   name: string,
   config: GridConfig,
   payload: Record<string, unknown> = { source: "manual_config" },
+  ownerUser = getDefaultBotOwnerUser(),
 ): Bot {
   const bot = createBot(name, {
     ...config,
     mode: "propr_live",
     autoPauseOutOfRange: true,
     autoRecenter: false,
-  });
+  }, ownerUser);
 
   addEvent({
     botId: bot.id,
@@ -291,18 +295,19 @@ export function createLiveCandidate(
   return bot;
 }
 
-export function createLiveCandidateFromBot(id: string): Bot {
-  const bot = getBot(id);
+export function createLiveCandidateFromBot(id: string, ownerUser?: string): Bot {
+  const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Bot not found.");
 
   return createLiveCandidate(liveCandidateName(bot.name), bot.config, {
     source: "local_sim_bot",
     sourceBotId: bot.id,
-  });
+  }, bot.ownerUser);
 }
 
-export function updateBotStatus(id: string, status: BotStatus) {
+export function updateBotStatus(id: string, status: BotStatus, ownerUser?: string) {
   bootstrapBots();
+  if (ownerUser && !getBot(id, ownerUser)) throw new Error("Bot not found.");
   const now = new Date().toISOString();
   getSqlite()
     .prepare("UPDATE bots SET status = ?, updated_at = ? WHERE id = ?")
@@ -321,9 +326,10 @@ export function updateBotStatus(id: string, status: BotStatus) {
 export function updateBotExitPrices(
   id: string,
   exits: { takeProfit?: string | null; stopLoss?: string | null },
+  ownerUser?: string,
 ): Bot {
   bootstrapBots();
-  const bot = getBot(id);
+  const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Bot not found.");
 
   const takeProfit = normalizeOptionalPositiveDecimal(exits.takeProfit, "Take profit");
@@ -347,13 +353,14 @@ export function updateBotExitPrices(
   });
   tx();
 
-  const updated = getBot(id);
+  const updated = getBot(id, ownerUser);
   if (!updated) throw new Error("Updated bot was not found.");
   return updated;
 }
 
-export function deleteBot(id: string) {
+export function deleteBot(id: string, ownerUser?: string) {
   bootstrapBots();
+  if (ownerUser && !getBot(id, ownerUser)) throw new Error("Bot not found.");
   const tx = getSqlite().transaction(() => {
     getSqlite().prepare("DELETE FROM fills WHERE bot_id = ?").run(id);
     getSqlite().prepare("DELETE FROM orders WHERE bot_id = ?").run(id);
@@ -363,40 +370,40 @@ export function deleteBot(id: string) {
   tx();
 }
 
-export async function createAndStartPaperBot(name: string, config: GridConfig): Promise<Bot> {
+export async function createAndStartPaperBot(name: string, config: GridConfig, ownerUser = getDefaultBotOwnerUser()): Promise<Bot> {
   if (config.mode === "propr_live") {
     throw new Error("Challenge mode cannot be started by the local simulation runtime.");
   }
 
-  const bot = createBot(name, config);
-  await startPaperBot(bot.id);
-  const updated = getBot(bot.id);
+  const bot = createBot(name, config, ownerUser);
+  await startPaperBot(bot.id, ownerUser);
+  const updated = getBot(bot.id, ownerUser);
   if (!updated) throw new Error("Started bot was not found.");
   return updated;
 }
 
-export async function createAndStartProprBot(name: string, config: GridConfig): Promise<Bot> {
-  await assertChallengeRiskBudget("", config);
+export async function createAndStartProprBot(name: string, config: GridConfig, ownerUser = getDefaultBotOwnerUser()): Promise<Bot> {
+  await assertChallengeRiskBudget("", config, ownerUser);
   const bot = createBot(name, {
     ...config,
     mode: "propr_live",
     autoPauseOutOfRange: true,
     autoRecenter: false,
-  });
-  await startProprBot(bot.id);
-  const updated = getBot(bot.id);
+  }, ownerUser);
+  await startProprBot(bot.id, ownerUser);
+  const updated = getBot(bot.id, ownerUser);
   if (!updated) throw new Error("Started Propr bot was not found.");
   return updated;
 }
 
-export async function startBot(id: string) {
-  const bot = getBot(id);
+export async function startBot(id: string, ownerUser?: string) {
+  const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Bot not found.");
-  return bot.config.mode === "propr_live" ? startProprBot(id) : startPaperBot(id);
+  return bot.config.mode === "propr_live" ? startProprBot(id, bot.ownerUser) : startPaperBot(id, bot.ownerUser);
 }
 
-export async function startPaperBot(id: string) {
-  const bot = getBot(id);
+export async function startPaperBot(id: string, ownerUser?: string) {
+  const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Bot not found.");
   if (bot.config.mode === "propr_live") {
     throw new Error("Challenge mode cannot be started from the local simulation runtime.");
@@ -441,14 +448,14 @@ export async function startPaperBot(id: string) {
   tx();
 }
 
-export async function startProprBot(id: string) {
-  const bot = getBot(id);
+export async function startProprBot(id: string, ownerUser?: string) {
+  const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Bot not found.");
   if (bot.config.mode !== "propr_live") {
     throw new Error("Only Propr Challenge bots can be started by the Propr runtime.");
   }
 
-  const readiness = await checkProprLiveReadiness();
+  const readiness = await checkProprLiveReadiness(bot.ownerUser);
   if (!readiness.liveEnabled) {
     throw new Error(`Propr challenge execution is blocked: ${readiness.blockers[0] ?? "readiness check failed"}`);
   }
@@ -464,9 +471,9 @@ export async function startProprBot(id: string) {
   if (bot.config.autoPauseOutOfRange && isOutOfRange(bot.config, referencePrice)) {
     throw new Error(`Current ${formatMarketSymbol(bot.config.pair)} price is outside the configured grid range.`);
   }
-  await assertChallengeRiskBudget(bot.id, bot.config);
+  await assertChallengeRiskBudget(bot.id, bot.config, bot.ownerUser);
 
-  const adapter = new ProprExecutionAdapter();
+  const adapter = createProprExecutionAdapter(bot.ownerUser);
   const health = await adapter.health();
   if (!health.ok) throw new Error(health.reason ?? "Propr adapter is not healthy.");
   await adapter.setLeverage(bot.config.pair, bot.config.leverage);
@@ -593,12 +600,12 @@ export async function startProprBot(id: string) {
   }
 }
 
-export async function stopBot(id: string) {
-  const bot = getBot(id);
+export async function stopBot(id: string, ownerUser?: string) {
+  const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Bot not found.");
 
   if (bot.config.mode === "propr_live") {
-    const adapter = new ProprExecutionAdapter();
+    const adapter = createProprExecutionAdapter(bot.ownerUser);
     const openOrders = listOrders(id).filter((order) => order.status === "open");
     for (const order of openOrders) {
       await adapter.cancelOrder(order.provider_order_id ?? order.id).catch(() => null);
@@ -625,12 +632,12 @@ export async function stopBot(id: string) {
   tx();
 }
 
-export async function closeBot(id: string, reason = "Manual close bot"): Promise<CloseBotSummary> {
-  const bot = getBot(id);
+export async function closeBot(id: string, reason = "Manual close bot", ownerUser?: string): Promise<CloseBotSummary> {
+  const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Bot not found.");
 
   if (bot.config.mode !== "propr_live") {
-    await stopBot(id);
+    await stopBot(id, bot.ownerUser);
     return {
       ok: true,
       botId: id,
@@ -645,7 +652,7 @@ export async function closeBot(id: string, reason = "Manual close bot"): Promise
     };
   }
 
-  const adapter = new ProprExecutionAdapter();
+  const adapter = createProprExecutionAdapter(bot.ownerUser);
   const health = await adapter.health();
   if (!health.ok) {
     const message = health.reason ?? "Propr adapter is not healthy.";
@@ -688,6 +695,7 @@ export async function closeBot(id: string, reason = "Manual close bot"): Promise
   const sameSideActiveBots = listBots().filter(
     (candidate) =>
       candidate.id !== bot.id &&
+      candidate.ownerUser === bot.ownerUser &&
       isActiveProprRuntimeBot(candidate) &&
       candidate.config.pair === bot.config.pair &&
       candidate.config.positionSide === bot.config.positionSide,
@@ -776,9 +784,12 @@ export async function closeBot(id: string, reason = "Manual close bot"): Promise
   };
 }
 
-export async function triggerProprEmergencyStop(reason = "Manual kill switch"): Promise<ProprEmergencyStopSummary> {
+export async function triggerProprEmergencyStop(
+  reason = "Manual kill switch",
+  ownerUser = getDefaultBotOwnerUser(),
+): Promise<ProprEmergencyStopSummary> {
   bootstrapBots();
-  const adapter = new ProprExecutionAdapter();
+  const adapter = createProprExecutionAdapter(ownerUser);
   const health = await adapter.health();
   if (!health.ok) {
     const message = health.reason ?? "Propr adapter is not healthy.";
@@ -791,10 +802,11 @@ export async function triggerProprEmergencyStop(reason = "Manual kill switch"): 
     throw new Error(message);
   }
 
-  const challenge = await getProprChallengeSummary(getRuntimeMetrics()).catch(() => undefined);
+  const challenge = await getProprChallengeSummary(getRuntimeMetrics(ownerUser), ownerUser).catch(() => undefined);
   const summary = await executeProprAccountEmergencyStop(adapter, {
     reason,
     challenge,
+    ownerUser,
     eventType: "bot.propr_emergency_stop",
   });
 
@@ -805,7 +817,7 @@ export async function triggerProprEmergencyStop(reason = "Manual kill switch"): 
   return summary;
 }
 
-export async function reconcileProprBot(id: string): Promise<{
+export async function reconcileProprBot(id: string, ownerUser?: string): Promise<{
   syncedOrders: number;
   insertedFills: number;
   placedGridOrders: number;
@@ -813,13 +825,13 @@ export async function reconcileProprBot(id: string): Promise<{
   safetyStopTriggered?: boolean;
   exitTrigger?: BotExitTrigger;
 }> {
-  const bot = getBot(id);
+  const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Bot not found.");
   if (bot.config.mode !== "propr_live") {
     throw new Error("Only Propr challenge bots can use Propr reconciliation.");
   }
 
-  const adapter = new ProprExecutionAdapter();
+  const adapter = createProprExecutionAdapter(bot.ownerUser);
   const safetyStopTriggered = await enforceProprChallengeSafetyStop(bot, adapter);
   if (safetyStopTriggered) {
     return { syncedOrders: 0, insertedFills: 0, placedGridOrders: 0, staleOpenOrders: 0, safetyStopTriggered: true };
@@ -916,6 +928,7 @@ export async function reconcileProprBot(id: string): Promise<{
     await closeBot(
       bot.id,
       `${exitLabel} triggered at mark ${exitEvaluation.markPrice} against level ${exitEvaluation.triggerPrice}.`,
+      bot.ownerUser,
     );
     return { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders, exitTrigger: exitEvaluation.trigger };
   }
@@ -1043,7 +1056,7 @@ function blocksPairedGridReplacement(
 }
 
 async function enforceProprChallengeSafetyStop(bot: Bot, adapter: ProprExecutionAdapter): Promise<boolean> {
-  const challenge = await getProprChallengeSummary(getRuntimeMetrics());
+  const challenge = await getProprChallengeSummary(getRuntimeMetrics(bot.ownerUser), bot.ownerUser);
   if (challenge.source !== "propr_live") return false;
 
   const equity = decimal(challenge.equity);
@@ -1060,6 +1073,7 @@ async function enforceProprChallengeSafetyStop(bot: Bot, adapter: ProprExecution
   await executeProprAccountEmergencyStop(adapter, {
     reason,
     challenge,
+    ownerUser: bot.ownerUser,
     referenceBotId: bot.id,
     eventType: "bot.propr_safety_stop",
     extraPayload: {
@@ -1077,13 +1091,14 @@ async function executeProprAccountEmergencyStop(
   options: {
     reason: string;
     challenge?: ProprChallengeSummary;
+    ownerUser: string;
     referenceBotId?: string;
     eventType: "bot.propr_emergency_stop" | "bot.propr_safety_stop";
     extraPayload?: Record<string, unknown>;
   },
 ): Promise<ProprEmergencyStopSummary> {
   const now = new Date().toISOString();
-  const activeLiveBots = listBots().filter(isActiveProprRuntimeBot);
+  const activeLiveBots = listBots(options.ownerUser).filter(isActiveProprRuntimeBot);
   const stoppedBotIds = activeLiveBots.length
     ? activeLiveBots.map((item) => item.id)
     : options.referenceBotId
@@ -1198,8 +1213,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown Propr emergency stop error";
 }
 
-export function simulateNextPaperFill(id: string) {
-  const bot = getBot(id);
+export function simulateNextPaperFill(id: string, ownerUser?: string) {
+  const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Bot not found.");
 
   const order = getSqlite()
@@ -1264,7 +1279,7 @@ export function simulateNextPaperFill(id: string) {
 export function reconcilePaperRuntime(options: PaperReconciliationOptions = {}): PaperReconciliationSummary {
   bootstrapBots();
   const emitEvents = options.emitEvents ?? true;
-  const candidates = listBots().filter(
+  const candidates = listBots(options.ownerUser).filter(
     (bot) =>
       (!options.botId || bot.id === options.botId) &&
       bot.config.mode !== "propr_live" &&
@@ -1292,15 +1307,42 @@ export function reconcilePaperRuntime(options: PaperReconciliationOptions = {}):
   return summary;
 }
 
-export function listEvents(limit = 50, botId?: string): ActivityEvent[] {
+export function listEvents(limit = 50, botId?: string, ownerUser?: string): ActivityEvent[] {
   bootstrapBots();
-  const rows = botId
-    ? (getSqlite()
-        .prepare("SELECT * FROM events WHERE bot_id = ? ORDER BY created_at DESC LIMIT ?")
-        .all(botId, limit) as EventRow[])
-    : (getSqlite()
-        .prepare("SELECT * FROM events ORDER BY created_at DESC LIMIT ?")
-        .all(limit) as EventRow[]);
+  let rows: EventRow[];
+  if (botId && ownerUser) {
+    rows = getSqlite()
+      .prepare(
+        `
+        SELECT e.*
+        FROM events e
+        JOIN bots b ON b.id = e.bot_id
+        WHERE e.bot_id = ? AND b.owner_user = ?
+        ORDER BY e.created_at DESC
+        LIMIT ?
+      `,
+      )
+      .all(botId, ownerUser, limit) as EventRow[];
+  } else if (botId) {
+    rows = getSqlite()
+      .prepare("SELECT * FROM events WHERE bot_id = ? ORDER BY created_at DESC LIMIT ?")
+      .all(botId, limit) as EventRow[];
+  } else if (ownerUser) {
+    rows = getSqlite()
+      .prepare(
+        `
+        SELECT e.*
+        FROM events e
+        LEFT JOIN bots b ON b.id = e.bot_id
+        WHERE e.bot_id IS NULL OR b.owner_user = ?
+        ORDER BY e.created_at DESC
+        LIMIT ?
+      `,
+      )
+      .all(ownerUser, limit) as EventRow[];
+  } else {
+    rows = getSqlite().prepare("SELECT * FROM events ORDER BY created_at DESC LIMIT ?").all(limit) as EventRow[];
+  }
   return rows.map(mapEvent);
 }
 
@@ -1379,19 +1421,52 @@ export function getSetting(key: string): PersistedSetting | null {
   return row ? { key: row.key, value: row.value, updatedAt: row.updated_at } : null;
 }
 
-export function getRuntimeMetrics(): RuntimeMetrics {
+export function getRuntimeMetrics(ownerUser?: string): RuntimeMetrics {
   bootstrapBots();
   const db = getSqlite();
-  const botRows = db.prepare("SELECT capital_allocation FROM bot_configs").all() as Array<{ capital_allocation: string }>;
-  const orderRows = db.prepare("SELECT quantity, price FROM orders WHERE status = 'open'").all() as Array<{
-    quantity: string;
-    price: string | null;
-  }>;
-  const fillRows = db.prepare("SELECT quantity, price, realized_pnl FROM fills").all() as Array<{
-    quantity: string;
-    price: string;
-    realized_pnl: string;
-  }>;
+  const botRows = ownerUser
+    ? (db
+        .prepare(
+          `
+          SELECT c.capital_allocation
+          FROM bot_configs c
+          JOIN bots b ON b.id = c.bot_id
+          WHERE b.owner_user = ?
+        `,
+        )
+        .all(ownerUser) as Array<{ capital_allocation: string }>)
+    : (db.prepare("SELECT capital_allocation FROM bot_configs").all() as Array<{ capital_allocation: string }>);
+  const orderRows = ownerUser
+    ? (db
+        .prepare(
+          `
+          SELECT o.quantity, o.price
+          FROM orders o
+          JOIN bots b ON b.id = o.bot_id
+          WHERE o.status = 'open' AND b.owner_user = ?
+        `,
+        )
+        .all(ownerUser) as Array<{ quantity: string; price: string | null }>)
+    : (db.prepare("SELECT quantity, price FROM orders WHERE status = 'open'").all() as Array<{
+        quantity: string;
+        price: string | null;
+      }>);
+  const fillRows = ownerUser
+    ? (db
+        .prepare(
+          `
+          SELECT f.quantity, f.price, f.realized_pnl
+          FROM fills f
+          JOIN bots b ON b.id = f.bot_id
+          WHERE b.owner_user = ?
+        `,
+        )
+        .all(ownerUser) as Array<{ quantity: string; price: string; realized_pnl: string }>)
+    : (db.prepare("SELECT quantity, price, realized_pnl FROM fills").all() as Array<{
+        quantity: string;
+        price: string;
+        realized_pnl: string;
+      }>);
 
   const allocated = botRows.reduce((sum, row) => sum.plus(row.capital_allocation), decimal(0));
   const exposure = orderRows.reduce(
@@ -1418,23 +1493,27 @@ export function getRuntimeMetrics(): RuntimeMetrics {
 export async function getChallengeRiskPreflightForConfig(
   config: GridConfig,
   botId = "",
+  ownerUser = getDefaultBotOwnerUser(),
 ): Promise<ChallengeRiskPreflight> {
-  const [challenge, markets] = await Promise.all([getProprChallengeSummary(getRuntimeMetrics()), getMarketSnapshots()]);
+  const [challenge, markets] = await Promise.all([
+    getProprChallengeSummary(getRuntimeMetrics(ownerUser), ownerUser),
+    getMarketSnapshots(),
+  ]);
   const markPrices = Object.fromEntries(markets.map((market) => [market.asset, market.mid]));
   return buildChallengeRiskPreflight({
     config,
     challenge,
-    committedBots: listBots(),
+    committedBots: listBots(ownerUser),
     currentBotId: botId,
     markPrice: markPrices[config.pair],
     markPrices,
   });
 }
 
-function insertBotRows(name: string, config: GridConfig, id: string, status: BotStatus, timestamp: string) {
+function insertBotRows(name: string, config: GridConfig, id: string, status: BotStatus, timestamp: string, ownerUser: string) {
   getSqlite()
-    .prepare("INSERT INTO bots (id, name, status, mode, pair, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .run(id, name, status, config.mode, config.pair, timestamp, timestamp);
+    .prepare("INSERT INTO bots (id, name, status, owner_user, mode, pair, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(id, name, status, ownerUser, config.mode, config.pair, timestamp, timestamp);
   getSqlite()
     .prepare(
       `
@@ -1780,8 +1859,8 @@ async function syncTradesForPlacedOrders(
   return insertedFills;
 }
 
-async function assertChallengeRiskBudget(botId: string, config: GridConfig) {
-  const preflight = await getChallengeRiskPreflightForConfig(config, botId);
+async function assertChallengeRiskBudget(botId: string, config: GridConfig, ownerUser: string) {
+  const preflight = await getChallengeRiskPreflightForConfig(config, botId, ownerUser);
   if (preflight.status === "blocked" || preflight.status === "invalid") {
     throw new Error(preflight.blockers[0] ?? "Challenge risk preflight failed.");
   }
@@ -1809,6 +1888,7 @@ function mapBot(row: BotJoinedRow): Bot {
     id: row.id,
     name: row.name,
     status: row.status,
+    ownerUser: row.owner_user ?? getDefaultBotOwnerUser(),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     config: {

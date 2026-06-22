@@ -1,7 +1,7 @@
 import { ulid } from "ulid";
 
 import { isBuilderMarket } from "@/domain/markets";
-import { getEnv } from "@/lib/env";
+import { getProprEnvForUser } from "@/lib/env";
 import type { MarketSymbol } from "@/domain/types";
 import type { OrderIntent } from "@/features/execution/types";
 
@@ -19,6 +19,7 @@ export class ProprAPIError extends Error {
 export interface ProprClientOptions {
   apiKey?: string;
   baseUrl?: string;
+  ownerUser?: string;
   timeoutMs?: number;
 }
 
@@ -138,7 +139,7 @@ export class ProprClient {
   accountId: string | null = null;
 
   constructor(options: ProprClientOptions = {}) {
-    const env = getEnv();
+    const env = getProprEnvForUser(options.ownerUser);
     this.apiKey = options.apiKey ?? env.PROPR_API_KEY ?? "";
     this.baseUrl = options.baseUrl ?? env.PROPR_API_URL;
     this.timeoutMs = options.timeoutMs ?? 30_000;

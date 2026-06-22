@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import type { ExecutionPosition } from "@/features/execution/types";
-import { ProprExecutionAdapter } from "@/features/execution/propr-adapter";
+import { createProprExecutionAdapter } from "@/features/execution/propr-adapter";
 import { getBotPerformanceRows } from "@/features/bots/performance";
 import { getRuntimeMetrics, listBots, listFills, listOrders } from "@/features/bots/repository";
 import { getMarketSnapshots } from "@/features/market-data/service";
@@ -9,18 +9,22 @@ import { getProprChallengeSummary } from "@/features/propr/challenge-summary";
 import { mergeProprWsPositionSnapshots } from "@/features/propr/ws-position-cache";
 import type { Bot, MarketSymbol } from "@/domain/types";
 import type { TerminalLiveFill, TerminalLiveOrder } from "@/components/trading/terminal-live-types";
+import { getCurrentUser } from "@/lib/auth/current-user";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const metrics = getRuntimeMetrics();
-  const bots = listBots().filter(isTerminalActiveBot);
+  const user = await getCurrentUser();
+  if (!user) return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+
+  const metrics = getRuntimeMetrics(user);
+  const bots = listBots(user).filter(isTerminalActiveBot);
   const marketAssets = activeMarketAssets(bots);
 
   const [markets, challenge, livePositions] = await Promise.all([
     getMarketSnapshots(marketAssets),
-    getProprChallengeSummary(metrics),
-    loadLivePositions(),
+    getProprChallengeSummary(metrics, user),
+    loadLivePositions(user),
   ]);
 
   return NextResponse.json({
@@ -46,12 +50,12 @@ function activeMarketAssets(bots: Bot[]): MarketSymbol[] {
   return assets.size ? Array.from(assets) : ["BTC"];
 }
 
-async function loadLivePositions(): Promise<ExecutionPosition[]> {
+async function loadLivePositions(ownerUser: string): Promise<ExecutionPosition[]> {
   try {
-    const adapter = new ProprExecutionAdapter();
+    const adapter = createProprExecutionAdapter(ownerUser);
     const health = await adapter.health();
     if (!health.ok) return [];
-    return mergeProprWsPositionSnapshots(await adapter.getPositions());
+    return mergeProprWsPositionSnapshots(await adapter.getPositions(), ownerUser);
   } catch {
     return [];
   }

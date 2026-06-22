@@ -74,8 +74,8 @@ export interface ProprWorkerWsStatus {
   updatedAt: string;
 }
 
-export async function runProprReconciliation(options: { botId?: string } = {}): Promise<ProprReconciliationSummary> {
-  const bots = listBots().filter(
+export async function runProprReconciliation(options: { botId?: string; ownerUser?: string } = {}): Promise<ProprReconciliationSummary> {
+  const bots = listBots(options.ownerUser).filter(
     (bot) =>
       bot.config.mode === "propr_live" &&
       ["live", "running", "out_of_range"].includes(bot.status) &&
@@ -96,7 +96,7 @@ export async function runProprReconciliation(options: { botId?: string } = {}): 
 
   for (const bot of bots) {
     try {
-      const result = await reconcileProprBot(bot.id);
+      const result = await reconcileProprBot(bot.id, bot.ownerUser);
       summary.reconciled += 1;
       summary.syncedOrders += result.syncedOrders;
       summary.insertedFills += result.insertedFills;

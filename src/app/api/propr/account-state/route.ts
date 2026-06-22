@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 
-import { ProprExecutionAdapter } from "@/features/execution/propr-adapter";
+import { createProprExecutionAdapter } from "@/features/execution/propr-adapter";
+import { getCurrentUser } from "@/lib/auth/current-user";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const adapter = new ProprExecutionAdapter();
+    const user = await getCurrentUser();
+    if (!user) return NextResponse.json({ error: "Authentication required." }, { status: 401 });
+
+    const adapter = createProprExecutionAdapter(user);
     const health = await adapter.health();
 
     if (!health.ok) {

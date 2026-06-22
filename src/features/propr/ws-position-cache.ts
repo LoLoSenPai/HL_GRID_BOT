@@ -1,7 +1,8 @@
 import type { ExecutionPosition } from "@/features/execution/types";
 import { getSetting, setSetting } from "@/features/bots/repository";
+import { getDefaultBotOwnerUser } from "@/lib/auth/session";
 
-const PROPR_WS_POSITIONS_KEY = "propr_ws_position_snapshots";
+const PROPR_WS_POSITIONS_KEY_PREFIX = "propr_ws_position_snapshots";
 
 export interface ProprWsPositionSnapshot {
   asset: string;
@@ -18,14 +19,19 @@ export interface ProprWsPositionSnapshot {
   updatedAt: string;
 }
 
-export function recordProprWsPositionEvent(eventType: string, data: unknown, receivedAt = new Date().toISOString()) {
+export function recordProprWsPositionEvent(
+  eventType: string,
+  data: unknown,
+  receivedAt = new Date().toISOString(),
+  ownerUser = getDefaultBotOwnerUser(),
+) {
   if (!eventType.startsWith("position.") || !isRecord(data)) return;
 
   const asset = stringField(data, "base") ?? stringField(data, "asset");
   const positionSide = stringField(data, "positionSide");
   if (!asset || !positionSide) return;
 
-  const snapshots = readPositionSnapshotMap();
+  const snapshots = readPositionSnapshotMap(ownerUser);
   const key = snapshotKey(asset, positionSide);
   const quantity = stringField(data, "quantity");
   if (eventType === "position.closed" || quantity === "0") {
@@ -47,15 +53,18 @@ export function recordProprWsPositionEvent(eventType: string, data: unknown, rec
     };
   }
 
-  setSetting(PROPR_WS_POSITIONS_KEY, JSON.stringify(snapshots));
+  setSetting(positionSnapshotSettingKey(ownerUser), JSON.stringify(snapshots));
 }
 
-export function getProprWsPositionSnapshots(): ProprWsPositionSnapshot[] {
-  return Object.values(readPositionSnapshotMap());
+export function getProprWsPositionSnapshots(ownerUser = getDefaultBotOwnerUser()): ProprWsPositionSnapshot[] {
+  return Object.values(readPositionSnapshotMap(ownerUser));
 }
 
-export function mergeProprWsPositionSnapshots(positions: ExecutionPosition[]): ExecutionPosition[] {
-  const snapshots = readPositionSnapshotMap();
+export function mergeProprWsPositionSnapshots(
+  positions: ExecutionPosition[],
+  ownerUser = getDefaultBotOwnerUser(),
+): ExecutionPosition[] {
+  const snapshots = readPositionSnapshotMap(ownerUser);
   return positions.map((position) => {
     const snapshot = snapshots[snapshotKey(position.asset, position.positionSide)];
     if (!snapshot) return position;
@@ -75,8 +84,8 @@ export function mergeProprWsPositionSnapshots(positions: ExecutionPosition[]): E
   });
 }
 
-function readPositionSnapshotMap(): Record<string, ProprWsPositionSnapshot> {
-  const setting = getSetting(PROPR_WS_POSITIONS_KEY);
+function readPositionSnapshotMap(ownerUser: string): Record<string, ProprWsPositionSnapshot> {
+  const setting = getSetting(positionSnapshotSettingKey(ownerUser));
   if (!setting) return {};
 
   try {
@@ -102,6 +111,10 @@ function isPositionSnapshot(value: unknown): value is ProprWsPositionSnapshot {
 
 function snapshotKey(asset: string, positionSide: string) {
   return `${asset}:${positionSide}`;
+}
+
+function positionSnapshotSettingKey(ownerUser: string): string {
+  return `${PROPR_WS_POSITIONS_KEY_PREFIX}:${ownerUser}`;
 }
 
 function stringField(data: Record<string, unknown>, key: string): string | undefined {

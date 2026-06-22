@@ -4,11 +4,13 @@ import { ActivityFeed } from "@/components/activity/activity-feed";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { listEvents } from "@/features/bots/repository";
+import { requireCurrentUser } from "@/lib/auth/current-user";
 
 export const dynamic = "force-dynamic";
 
-export default function ActivityPage() {
-  const events = listEvents(100);
+export default async function ActivityPage() {
+  const user = await requireCurrentUser();
+  const events = listEvents(100, undefined, user);
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-auto p-4 lg:p-6">

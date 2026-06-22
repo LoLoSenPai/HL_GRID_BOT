@@ -10,7 +10,7 @@ import {
 import type { RuntimeMetrics } from "@/domain/types";
 import { createProprClient, type ProprAccount, type ProprChallengeAttempt } from "@/features/propr/client";
 import { resolveDailyEquityBaseline } from "@/features/propr/daily-equity-baseline";
-import { getEnv } from "@/lib/env";
+import { getProprEnvForUser } from "@/lib/env";
 import { logger } from "@/lib/logger";
 
 export interface ProprChallengeSummary {
@@ -39,15 +39,15 @@ export interface ProprChallengeSummary {
   warning?: string;
 }
 
-export async function getProprChallengeSummary(metrics: RuntimeMetrics): Promise<ProprChallengeSummary> {
-  const env = getEnv();
+export async function getProprChallengeSummary(metrics: RuntimeMetrics, ownerUser?: string): Promise<ProprChallengeSummary> {
+  const env = getProprEnvForUser(ownerUser);
 
   if (!env.PROPR_API_KEY) {
     return localFallbackSummary(metrics, "Propr API key is not configured.");
   }
 
   try {
-    const client = createProprClient();
+    const client = createProprClient({ ownerUser });
     const attempts = await client.getChallengeAttempts({ status: "active" });
     if (!attempts[0]?.accountId) {
       return localFallbackSummary(metrics, "No active Propr challenge account found.");

@@ -6,12 +6,14 @@ import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { Bot } from "@/domain/types";
 import { listBots } from "@/features/bots/repository";
+import { requireCurrentUser } from "@/lib/auth/current-user";
 import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
-export default function BotHistoryPage() {
-  const bots = listBots().filter(isHistoricalBot);
+export default async function BotHistoryPage() {
+  const user = await requireCurrentUser();
+  const bots = listBots(user).filter(isHistoricalBot);
 
   return (
     <div className="flex h-full flex-col gap-4 overflow-auto p-4 lg:p-6">

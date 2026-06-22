@@ -1,5 +1,5 @@
 import { accountIdMatches, createProprClient, ProprAPIError, type ProprLeverageLimits } from "@/features/propr/client";
-import { getEnv, redactSecret } from "@/lib/env";
+import { getProprEnvForUser, redactSecret } from "@/lib/env";
 
 const DEFAULT_PROPR_API_URL = "https://api.propr.xyz/v1";
 
@@ -17,15 +17,15 @@ export interface ProprLiveReadiness {
   activeChallengeCount: number;
   activeAccountId?: string;
   selectedAccountId?: string;
-  selectedAccountIdName: "PROPR_ACCOUNT_ID";
+  selectedAccountIdName: string;
   leverageLimits: ProprLeverageLimits | null;
   liveEnabled: boolean;
   blockers: string[];
   warnings: string[];
 }
 
-export async function checkProprLiveReadiness(): Promise<ProprLiveReadiness> {
-  const env = getEnv();
+export async function checkProprLiveReadiness(ownerUser?: string): Promise<ProprLiveReadiness> {
+  const env = getProprEnvForUser(ownerUser);
   const readiness: ProprLiveReadiness = {
     checkedAt: new Date().toISOString(),
     apiUrl: env.PROPR_API_URL,
@@ -51,7 +51,7 @@ export async function checkProprLiveReadiness(): Promise<ProprLiveReadiness> {
     return readiness;
   }
 
-  const client = createProprClient();
+  const client = createProprClient({ ownerUser });
 
   try {
     readiness.health.services = await client.healthServices();

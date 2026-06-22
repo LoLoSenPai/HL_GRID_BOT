@@ -7,7 +7,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: NextRequest) {
   const formData = await request.formData();
-  const username = String(formData.get("username") ?? "");
+  const username = String(formData.get("username") ?? "").trim();
   const password = String(formData.get("password") ?? "");
   const nextPath = safeNextPath(formData.get("next"));
 

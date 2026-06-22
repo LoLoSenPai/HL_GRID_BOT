@@ -5,6 +5,7 @@ import { runPaperReconciliation } from "@/server/workers/paper-reconciliation-wo
 
 export interface PaperRuntimeTickOptions {
   limit?: number;
+  ownerUser?: string;
   markPrices?: Partial<Record<MarketSymbol, string>>;
 }
 
@@ -22,9 +23,10 @@ export async function runPaperRuntimeTick(options: PaperRuntimeTickOptions = {})
   const limit = Math.max(1, Math.min(options.limit ?? 1, 10));
   const reconciliation = await runPaperReconciliation({
     emitEvents: false,
+    ownerUser: options.ownerUser,
     markPrices: options.markPrices,
   });
-  const bots = listBots().filter((bot) => PAPER_RUNTIME_STATUSES.has(bot.status));
+  const bots = listBots(options.ownerUser).filter((bot) => PAPER_RUNTIME_STATUSES.has(bot.status));
   const summary: PaperRuntimeTickSummary = {
     scanned: bots.length,
     reconciled: reconciliation.reconciled,
@@ -43,7 +45,7 @@ export async function runPaperRuntimeTick(options: PaperRuntimeTickOptions = {})
     }
 
     try {
-      simulateNextPaperFill(bot.id);
+      simulateNextPaperFill(bot.id, bot.ownerUser);
       summary.filled += 1;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Paper tick failed";

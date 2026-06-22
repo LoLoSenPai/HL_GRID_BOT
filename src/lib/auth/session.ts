@@ -2,9 +2,13 @@ export const AUTH_COOKIE_NAME = "hl_grid_session";
 export const AUTH_MAX_AGE_SECONDS = 60 * 60 * 12;
 
 interface AuthConfig {
+  users: AuthUserConfig[];
+  secret: string;
+}
+
+interface AuthUserConfig {
   username: string;
   password: string;
-  secret: string;
 }
 
 interface SessionPayload {
@@ -21,7 +25,15 @@ export function isAuthConfigured(): boolean {
 }
 
 export function getAuthUsername(): string | undefined {
-  return readAuthConfig()?.username;
+  return getAuthUsernames()[0];
+}
+
+export function getAuthUsernames(): string[] {
+  return readAuthConfig()?.users.map((user) => user.username) ?? [];
+}
+
+export function getDefaultBotOwnerUser(): string {
+  return getAuthUsername() ?? "local";
 }
 
 export function safeNextPath(value: FormDataEntryValue | string | null | undefined): string {
@@ -34,7 +46,9 @@ export async function validateCredentials(username: string, password: string): P
   const config = readAuthConfig();
   if (!config) return false;
 
-  return constantTimeEqual(username, config.username) && constantTimeEqual(password, config.password);
+  return config.users.some(
+    (user) => constantTimeEqual(username.trim(), user.username) && constantTimeEqual(password, user.password),
+  );
 }
 
 export async function createSessionToken(username: string): Promise<string> {
@@ -51,32 +65,67 @@ export async function createSessionToken(username: string): Promise<string> {
 }
 
 export async function verifySessionToken(token?: string): Promise<boolean> {
-  if (isAuthDisabled()) return true;
+  return Boolean(await readSessionToken(token));
+}
+
+export async function readSessionToken(token?: string): Promise<SessionPayload | null> {
+  if (isAuthDisabled()) {
+    return { username: getDefaultBotOwnerUser(), expiresAt: Number.MAX_SAFE_INTEGER };
+  }
 
   const config = readAuthConfig();
-  if (!config || !token) return false;
+  if (!config || !token) return null;
 
   const [encodedPayload, signature] = token.split(".");
-  if (!encodedPayload || !signature) return false;
+  if (!encodedPayload || !signature) return null;
 
   const expectedSignature = await sign(encodedPayload, config.secret);
-  if (!constantTimeEqual(signature, expectedSignature)) return false;
+  if (!constantTimeEqual(signature, expectedSignature)) return null;
 
   try {
     const payload = JSON.parse(base64UrlToString(encodedPayload)) as Partial<SessionPayload>;
-    return payload.username === config.username && typeof payload.expiresAt === "number" && payload.expiresAt > Date.now();
+    if (typeof payload.username !== "string" || typeof payload.expiresAt !== "number") return null;
+    if (payload.expiresAt <= Date.now()) return null;
+    if (!config.users.some((user) => user.username === payload.username)) return null;
+    return { username: payload.username, expiresAt: payload.expiresAt };
   } catch {
-    return false;
+    return null;
   }
 }
 
 function readAuthConfig(): AuthConfig | null {
+  const secret = process.env.APP_AUTH_SECRET?.trim();
+  const users = parseAuthUsers();
+
+  if (!users.length || !secret || secret.length < 32) return null;
+  return { users, secret };
+}
+
+function parseAuthUsers(): AuthUserConfig[] {
+  const multiUserConfig = process.env.APP_AUTH_USERS?.trim();
+  if (multiUserConfig) {
+    return multiUserConfig
+      .split(/[\n,;]/u)
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map(parseAuthUserEntry)
+      .filter((user): user is AuthUserConfig => Boolean(user));
+  }
+
   const username = process.env.APP_AUTH_USERNAME?.trim();
   const password = process.env.APP_AUTH_PASSWORD?.trim();
-  const secret = process.env.APP_AUTH_SECRET?.trim();
+  if (!username || !password) return [];
+  return [{ username, password }];
+}
 
-  if (!username || !password || !secret || secret.length < 32) return null;
-  return { username, password, secret };
+function parseAuthUserEntry(entry: string): AuthUserConfig | null {
+  const separatorIndex = entry.search(/[:=]/u);
+  if (separatorIndex <= 0) return null;
+
+  const username = entry.slice(0, separatorIndex).trim();
+  const password = entry.slice(separatorIndex + 1).trim();
+  if (!username || !password) return null;
+  return { username, password };
 }
 
 async function sign(payload: string, secret: string): Promise<string> {

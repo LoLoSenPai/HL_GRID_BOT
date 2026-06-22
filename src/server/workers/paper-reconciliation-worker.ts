@@ -7,6 +7,7 @@ import { getMarketSnapshots } from "@/features/market-data/service";
 
 export interface PaperReconciliationWorkerOptions {
   botId?: string;
+  ownerUser?: string;
   emitEvents?: boolean;
   markPrices?: Partial<Record<MarketSymbol, string>>;
 }
@@ -18,6 +19,7 @@ export async function runPaperReconciliation(
 
   return reconcilePaperRuntime({
     botId: options.botId,
+    ownerUser: options.ownerUser,
     emitEvents: options.emitEvents,
     markPrices,
   });

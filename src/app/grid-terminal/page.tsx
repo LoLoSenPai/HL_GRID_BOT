@@ -34,11 +34,12 @@ import {
 } from "@/features/bots/repository";
 import { defaultBotConfig } from "@/features/bots/sample-data";
 import { getCandlesForConfig, getMarketSnapshots } from "@/features/market-data/service";
-import { ProprExecutionAdapter } from "@/features/execution/propr-adapter";
+import { createProprExecutionAdapter } from "@/features/execution/propr-adapter";
 import type { ExecutionPosition } from "@/features/execution/types";
 import { getProprChallengeSummary } from "@/features/propr/challenge-summary";
 import { mergeProprWsPositionSnapshots } from "@/features/propr/ws-position-cache";
 import type { Bot } from "@/domain/types";
+import { requireCurrentUser } from "@/lib/auth/current-user";
 
 export const dynamic = "force-dynamic";
 
@@ -47,7 +48,8 @@ export default async function GridTerminalPage({
 }: {
   searchParams: Promise<{ botId?: string | string[] | undefined }>;
 }) {
-  const bots = listBots();
+  const user = await requireCurrentUser();
+  const bots = listBots(user);
   const params = await searchParams;
   const requestedBotId = Array.isArray(params.botId) ? params.botId[0] : params.botId;
   const requestedBot = requestedBotId ? bots.find((bot) => bot.id === requestedBotId) : undefined;
@@ -55,8 +57,8 @@ export default async function GridTerminalPage({
   const activeBot =
     requestedBot ?? terminalBots.find((bot) => ["paper", "running", "live", "out_of_range"].includes(bot.status)) ?? terminalBots[0] ?? bots[0];
   const baseConfig = activeBot?.config ?? defaultBotConfig;
-  const metrics = getRuntimeMetrics();
-  const events = activeBot ? listEvents(20, activeBot.id) : [];
+  const metrics = getRuntimeMetrics(user);
+  const events = activeBot ? listEvents(20, activeBot.id, user) : [];
   const orders = activeBot ? listOrders(activeBot.id) : [];
   const fills = activeBot ? listFills(activeBot.id) : [];
   const runtimeState = activeBot ? getBotRuntimeState(activeBot.id) : null;
@@ -75,8 +77,8 @@ export default async function GridTerminalPage({
       : null;
   const [markets, challenge, livePositions] = await Promise.all([
     getMarketSnapshots(),
-    getProprChallengeSummary(metrics),
-    loadLivePositions(),
+    getProprChallengeSummary(metrics, user),
+    loadLivePositions(user),
   ]);
   const initialLiveSnapshot = {
     checkedAt: new Date().toISOString(),
@@ -255,12 +257,12 @@ function isTerminalActiveBot(bot: Bot): boolean {
   return ["paper", "running", "live", "out_of_range", "paused"].includes(bot.status);
 }
 
-async function loadLivePositions(): Promise<ExecutionPosition[]> {
+async function loadLivePositions(ownerUser: string): Promise<ExecutionPosition[]> {
   try {
-    const adapter = new ProprExecutionAdapter();
+    const adapter = createProprExecutionAdapter(ownerUser);
     const health = await adapter.health();
     if (!health.ok) return [];
-    return mergeProprWsPositionSnapshots(await adapter.getPositions());
+    return mergeProprWsPositionSnapshots(await adapter.getPositions(), ownerUser);
   } catch {
     return [];
   }

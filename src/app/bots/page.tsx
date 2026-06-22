@@ -8,11 +8,13 @@ import { cn } from "@/lib/utils";
 import { createBotAction } from "@/features/bots/actions";
 import { listBots } from "@/features/bots/repository";
 import type { Bot } from "@/domain/types";
+import { requireCurrentUser } from "@/lib/auth/current-user";
 
 export const dynamic = "force-dynamic";
 
-export default function BotsPage() {
-  const bots = listBots();
+export default async function BotsPage() {
+  const user = await requireCurrentUser();
+  const bots = listBots(user);
   const activeBots = bots.filter(isOperationalBot);
   const historyCount = bots.length - activeBots.length;
 

@@ -7,14 +7,16 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { decimal, toDecimalString } from "@/domain/decimal";
 import { getRuntimeMetrics, listBots, listEvents } from "@/features/bots/repository";
 import { getProprChallengeSummary } from "@/features/propr/challenge-summary";
+import { requireCurrentUser } from "@/lib/auth/current-user";
 
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
-  const bots = listBots();
-  const events = listEvents(3);
-  const metrics = getRuntimeMetrics();
-  const challengePromise = getProprChallengeSummary(metrics);
+  const user = await requireCurrentUser();
+  const bots = listBots(user);
+  const events = listEvents(3, undefined, user);
+  const metrics = getRuntimeMetrics(user);
+  const challengePromise = getProprChallengeSummary(metrics, user);
   const activeBots = bots.filter((bot) => ["paper", "running", "live", "out_of_range"].includes(bot.status)).length;
   const challenge = await challengePromise;
   const challengePnl = toDecimalString(decimal(challenge.realizedPnl).plus(challenge.unrealizedPnl), 2);

@@ -20,15 +20,17 @@ import {
 } from "@/features/bots/actions";
 import { getBot, getBotRuntimeState, getRuntimeMetrics, listEvents, listOrders } from "@/features/bots/repository";
 import { getCandlesForConfig } from "@/features/market-data/service";
+import { requireCurrentUser } from "@/lib/auth/current-user";
 
 export const dynamic = "force-dynamic";
 
 export default async function BotDetailPage({ params }: { params: Promise<{ id: string }> }) {
+  const user = await requireCurrentUser();
   const { id } = await params;
-  const bot = getBot(id);
+  const bot = getBot(id, user);
   if (!bot) notFound();
-  const metrics = getRuntimeMetrics();
-  const events = listEvents(30, bot.id);
+  const metrics = getRuntimeMetrics(user);
+  const events = listEvents(30, bot.id, user);
   const openOrders = listOrders(bot.id).filter((order) => order.status === "open");
   const runtimeState = getBotRuntimeState(bot.id);
   const candles = await getCandlesForConfig(bot.config);

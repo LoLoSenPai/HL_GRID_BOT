@@ -5,13 +5,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import type { ProprLeverageLimits } from "@/features/propr/client";
 import { checkProprLiveReadiness } from "@/features/propr/readiness";
-import { getEnv, redactSecret } from "@/lib/env";
+import { requireCurrentUser } from "@/lib/auth/current-user";
+import { getProprEnvForUser, redactSecret } from "@/lib/env";
 
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
-  const env = getEnv();
-  const readiness = await checkProprLiveReadiness();
+  const user = await requireCurrentUser();
+  const env = getProprEnvForUser(user);
+  const readiness = await checkProprLiveReadiness(user);
   const readinessMessage = readiness.liveEnabled
     ? "Propr auth, active challenge and service health are ready for guarded live mode."
     : readiness.blockers.join(" ");
@@ -41,6 +43,7 @@ export default async function SettingsPage() {
             <SettingRow label="PROPR_API_URL" value={env.PROPR_API_URL} />
             <SettingRow label="PROPR_WS_URL" value={env.PROPR_WS_URL} />
             <SettingRow label="PROPR_API_KEY" value={redactSecret(env.PROPR_API_KEY)} />
+            <SettingRow label="APP_USER" value={user} />
             <SettingRow
               label={env.PROPR_SELECTED_ACCOUNT_ID_NAME}
               value={env.PROPR_SELECTED_ACCOUNT_ID ? redactIdentifier(env.PROPR_SELECTED_ACCOUNT_ID) : "unset"}

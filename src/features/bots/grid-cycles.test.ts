@@ -8,6 +8,7 @@ const baseBot: Bot = {
   id: "bot_test",
   name: "Test Grid",
   status: "live",
+  ownerUser: "loic",
   createdAt: "2026-06-14T00:00:00.000Z",
   updatedAt: "2026-06-14T00:00:00.000Z",
   config: {

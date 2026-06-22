@@ -66,6 +66,7 @@ export interface Bot {
   id: string;
   name: string;
   status: BotStatus;
+  ownerUser: string;
   config: GridConfig;
   createdAt: string;
   updatedAt: string;

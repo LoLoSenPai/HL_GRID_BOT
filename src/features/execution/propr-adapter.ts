@@ -145,3 +145,7 @@ export class ProprExecutionAdapter implements ExecutionAdapter {
     }
   }
 }
+
+export function createProprExecutionAdapter(ownerUser?: string): ProprExecutionAdapter {
+  return new ProprExecutionAdapter(createProprClient({ ownerUser }));
+}
