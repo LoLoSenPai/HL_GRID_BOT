@@ -15,8 +15,10 @@ import {
   listBots,
   listEvents,
   reconcilePaperRuntime,
+  reconcileProprBot,
   simulateNextPaperFill,
   startPaperBot,
+  updateBotStatus,
 } from "@/features/bots/repository";
 import { defaultBotConfig } from "@/features/bots/sample-data";
 
@@ -114,5 +116,22 @@ describe("bot repository", () => {
     expect(liveCandidate.config.autoPauseOutOfRange).toBe(true);
     expect(liveCandidate.config.autoRecenter).toBe(false);
     expect(listEvents(10, liveCandidate.id).some((event) => event.type === "bot.live_candidate_created")).toBe(true);
+  });
+
+  it("does not reconcile or repair a Propr bot once closing has started", async () => {
+    const liveCandidate = createLiveCandidate("Repository Closing Challenge Bot", {
+      ...defaultBotConfig,
+      mode: "propr_live",
+    });
+    updateBotStatus(liveCandidate.id, "closing");
+
+    const result = await reconcileProprBot(liveCandidate.id);
+
+    expect(result).toEqual({
+      syncedOrders: 0,
+      insertedFills: 0,
+      placedGridOrders: 0,
+      staleOpenOrders: 0,
+    });
   });
 });

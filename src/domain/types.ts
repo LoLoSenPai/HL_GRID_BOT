@@ -22,6 +22,7 @@ export type BotStatus =
   | "live"
   | "paused"
   | "out_of_range"
+  | "closing"
   | "error"
   | "stopped";
 

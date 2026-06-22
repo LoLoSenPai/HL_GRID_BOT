@@ -75,6 +75,8 @@ interface RuntimeStateRow {
 }
 
 const LEGACY_SAMPLE_BOT_IDS = ["bot_btc_range_v1", "bot_eth_compact", "bot_sol_lab"];
+const PROPR_SHUTDOWN_CANCEL_PASSES = 5;
+const PROPR_SHUTDOWN_SETTLE_MS = 200;
 
 export interface PersistedOrder {
   id: string;
@@ -606,10 +608,46 @@ export async function stopBot(id: string, ownerUser?: string) {
 
   if (bot.config.mode === "propr_live") {
     const adapter = createProprExecutionAdapter(bot.ownerUser);
-    const openOrders = listOrders(id).filter((order) => order.status === "open");
-    for (const order of openOrders) {
-      await adapter.cancelOrder(order.provider_order_id ?? order.id).catch(() => null);
+    const health = await adapter.health();
+    if (!health.ok) throw new Error(health.reason ?? "Propr adapter is not healthy.");
+
+    markBotClosing(bot, "Stop requested");
+    const cancellation = await cancelTrackedProprOrders(bot, adapter);
+    const now = new Date().toISOString();
+    const ok = cancellation.errors.length === 0 && cancellation.remainingProviderOrderIds.length === 0;
+    const nextStatus: BotStatus = ok ? "stopped" : "error";
+    const tx = getSqlite().transaction(() => {
+      if (ok) {
+        getSqlite()
+          .prepare(
+            "UPDATE orders SET status = 'cancelled', updated_at = ? WHERE bot_id = ? AND status IN ('pending', 'open', 'partially_filled')",
+          )
+          .run(now, id);
+      }
+      getSqlite().prepare("UPDATE bots SET status = ?, updated_at = ? WHERE id = ?").run(nextStatus, now, id);
+      getSqlite()
+        .prepare("UPDATE bot_runtime_state SET state = ?, updated_at = ? WHERE bot_id = ?")
+        .run(nextStatus, now, id);
+      addEvent({
+        botId: id,
+        type: ok ? "bot.stopped" : "bot.stop_failed",
+        severity: ok ? "warning" : "error",
+        message: ok
+          ? "Bot stopped and all tracked Propr orders confirmed closed. The position was left open."
+          : "Bot stop failed because tracked Propr orders remain open.",
+        payload: {
+          cancelledOrders: cancellation.cancelledProviderOrderIds.length,
+          remainingProviderOrderIds: cancellation.remainingProviderOrderIds,
+          errors: cancellation.errors,
+        },
+      });
+    });
+    tx();
+
+    if (!ok) {
+      throw new Error(cancellation.errors[0] ?? "Tracked Propr orders remain open after stop.");
     }
+    return;
   }
 
   bootstrapBots();
@@ -668,17 +706,11 @@ export async function closeBot(id: string, reason = "Manual close bot", ownerUse
 
   const checkedAt = new Date().toISOString();
   const errors: string[] = [];
-  const cancelledOrderIds: string[] = [];
-  const openOrders = listOrders(id).filter((order) => order.status === "open");
+  markBotClosing(bot, reason);
+  const cancellation = await cancelTrackedProprOrders(bot, adapter);
+  errors.push(...cancellation.errors);
 
-  for (const order of openOrders) {
-    try {
-      await adapter.cancelOrder(order.provider_order_id ?? order.id);
-      cancelledOrderIds.push(order.id);
-    } catch (error) {
-      errors.push(`cancel ${order.provider_order_id ?? order.id} failed: ${errorMessage(error)}`);
-    }
-  }
+  let syncedFills = await syncTradesForPersistedOrders(bot, adapter);
 
   let positions: ExecutionPosition[] = [];
   try {
@@ -692,22 +724,25 @@ export async function closeBot(id: string, reason = "Manual close bot", ownerUse
   );
   const positionQuantity = matchingPosition ? decimal(matchingPosition.quantity) : decimal(0);
   const localInventoryQuantity = estimateBotInventoryQuantity(bot);
-  const sameSideActiveBots = listBots().filter(
+  const sameSideTrackedBots = listBots(bot.ownerUser).filter(
     (candidate) =>
       candidate.id !== bot.id &&
       candidate.ownerUser === bot.ownerUser &&
-      isActiveProprRuntimeBot(candidate) &&
+      candidate.config.mode === "propr_live" &&
       candidate.config.pair === bot.config.pair &&
-      candidate.config.positionSide === bot.config.positionSide,
+      candidate.config.positionSide === bot.config.positionSide &&
+      estimateBotInventoryQuantity(candidate).gt(0),
   );
   const closeQuantity =
-    localInventoryQuantity.gt(0) || sameSideActiveBots.length > 0
+    localInventoryQuantity.gt(0) || sameSideTrackedBots.length > 0
       ? DecimalMin(localInventoryQuantity, positionQuantity)
       : positionQuantity;
   let closeOrder: ExecutionOrder | null = null;
-  let syncedFills = 0;
+  const closeEntirePosition = sameSideTrackedBots.length === 0 && closeQuantity.eq(positionQuantity);
+  let remainingPositionQuantity = positionQuantity;
+  const trackedOrdersCleared = cancellation.errors.length === 0 && cancellation.remainingProviderOrderIds.length === 0;
 
-  if (closeQuantity.gt(0)) {
+  if (trackedOrdersCleared && closeQuantity.gt(0)) {
     try {
       closeOrder = await adapter.placeOrder({
         clientOrderId: ulid(),
@@ -720,21 +755,50 @@ export async function closeBot(id: string, reason = "Manual close bot", ownerUse
         quantity: toDecimalString(closeQuantity, 8),
         timeInForce: "IOC",
         reduceOnly: true,
+        closePosition: closeEntirePosition,
       });
       insertOrder(closeOrder);
-      syncedFills = await syncTradesForPlacedOrders(bot, adapter, [closeOrder]);
+      syncedFills += await syncTradesForPlacedOrders(bot, adapter, [closeOrder]);
+      const verification = await verifyPositionReduction(
+        bot,
+        adapter,
+        positionQuantity,
+        closeQuantity,
+        closeEntirePosition,
+      );
+      remainingPositionQuantity = verification.remainingQuantity;
+      if (!verification.ok) {
+        errors.push(
+          `Position close not confirmed: ${toDecimalString(verification.remainingQuantity, 8)} ${formatMarketSymbol(bot.config.pair)} remains open.`,
+        );
+      }
     } catch (error) {
       errors.push(`close ${formatMarketSymbol(bot.config.pair)} ${bot.config.positionSide} failed: ${errorMessage(error)}`);
     }
+  } else if (!trackedOrdersCleared) {
+    errors.push("Position close skipped because tracked entry orders could not be confirmed closed on Propr.");
   }
+
+  const finalCancellation = await cancelTrackedProprOrders(bot, adapter);
+  errors.push(...finalCancellation.errors);
+  const cancelledProviderOrderIds = new Set([
+    ...cancellation.cancelledProviderOrderIds,
+    ...finalCancellation.cancelledProviderOrderIds,
+  ]);
+  if (finalCancellation.remainingProviderOrderIds.length > 0) {
+    errors.push(`${finalCancellation.remainingProviderOrderIds.length} tracked Propr orders remain open after close.`);
+  }
+  syncedFills += await syncTradesForPersistedOrders(bot, adapter);
 
   const ok = errors.length === 0;
   const nextStatus: BotStatus = ok ? "stopped" : "error";
   const tx = getSqlite().transaction(() => {
-    for (const orderId of cancelledOrderIds) {
+    if (finalCancellation.remainingProviderOrderIds.length === 0) {
       getSqlite()
-        .prepare("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE id = ?")
-        .run(checkedAt, orderId);
+        .prepare(
+          "UPDATE orders SET status = 'cancelled', updated_at = ? WHERE bot_id = ? AND status IN ('pending', 'open', 'partially_filled')",
+        )
+        .run(checkedAt, id);
     }
     if (closeOrder) insertOrder(closeOrder);
     getSqlite().prepare("UPDATE bots SET status = ?, updated_at = ? WHERE id = ?").run(nextStatus, checkedAt, id);
@@ -746,17 +810,20 @@ export async function closeBot(id: string, reason = "Manual close bot", ownerUse
       type: ok ? "bot.closed" : "bot.close_failed",
       severity: ok ? "warning" : "error",
       message: ok
-        ? "Bot closed: local orders cancelled and bot inventory close attempted."
+        ? "Bot closed: tracked orders cancelled and position reduction confirmed on Propr."
         : "Bot close attempted with errors.",
       payload: {
         reason,
-        cancelledOrders: cancelledOrderIds.length,
+        cancelledOrders: cancelledProviderOrderIds.size,
         inventoryQuantity: toDecimalString(localInventoryQuantity, 8),
         positionQuantity: toDecimalString(positionQuantity, 8),
         closeQuantity: toDecimalString(closeQuantity, 8),
         closeOrderId: closeOrder?.providerOrderId ?? closeOrder?.id,
         closeOrderStatus: closeOrder?.status,
-        sameSideActiveBots: sameSideActiveBots.length,
+        closeEntirePosition,
+        remainingPositionQuantity: toDecimalString(remainingPositionQuantity, 8),
+        sameSideTrackedBots: sameSideTrackedBots.length,
+        remainingProviderOrderIds: finalCancellation.remainingProviderOrderIds,
         syncedFills,
         errors,
       },
@@ -772,7 +839,7 @@ export async function closeBot(id: string, reason = "Manual close bot", ownerUse
     ok,
     botId: id,
     reason,
-    cancelledOrders: cancelledOrderIds.length,
+    cancelledOrders: cancelledProviderOrderIds.size,
     inventoryQuantity: toDecimalString(localInventoryQuantity, 8),
     positionQuantity: toDecimalString(positionQuantity, 8),
     closeQuantity: toDecimalString(closeQuantity, 8),
@@ -782,6 +849,136 @@ export async function closeBot(id: string, reason = "Manual close bot", ownerUse
     errors,
     checkedAt,
   };
+}
+
+interface TrackedOrderCancellationResult {
+  cancelledProviderOrderIds: string[];
+  remainingProviderOrderIds: string[];
+  errors: string[];
+}
+
+function markBotClosing(bot: Bot, reason: string) {
+  const now = new Date().toISOString();
+  const tx = getSqlite().transaction(() => {
+    getSqlite()
+      .prepare("UPDATE bots SET status = 'closing', updated_at = ? WHERE id = ? AND owner_user = ?")
+      .run(now, bot.id, bot.ownerUser);
+    getSqlite()
+      .prepare("UPDATE bot_runtime_state SET state = 'closing', updated_at = ? WHERE bot_id = ?")
+      .run(now, bot.id);
+    addEvent({
+      botId: bot.id,
+      type: "bot.closing",
+      severity: "warning",
+      message: "Bot closing started. Grid repair is disabled before Propr orders are cancelled.",
+      payload: { reason },
+    });
+  });
+  tx();
+}
+
+async function cancelTrackedProprOrders(
+  bot: Bot,
+  adapter: ProprExecutionAdapter,
+): Promise<TrackedOrderCancellationResult> {
+  const cancelledProviderOrderIds = new Set<string>();
+  let remainingOrders: ExecutionOrder[] = [];
+  let lastCancelErrors: string[] = [];
+
+  for (let pass = 0; pass < PROPR_SHUTDOWN_CANCEL_PASSES; pass += 1) {
+    try {
+      remainingOrders = await getTrackedOpenProviderOrders(bot, adapter);
+    } catch (error) {
+      return {
+        cancelledProviderOrderIds: [...cancelledProviderOrderIds],
+        remainingProviderOrderIds: remainingOrders.map(providerOrderId),
+        errors: [`open order verification failed: ${errorMessage(error)}`],
+      };
+    }
+
+    if (remainingOrders.length === 0) {
+      return {
+        cancelledProviderOrderIds: [...cancelledProviderOrderIds],
+        remainingProviderOrderIds: [],
+        errors: [],
+      };
+    }
+
+    lastCancelErrors = [];
+    for (const order of remainingOrders) {
+      const orderId = providerOrderId(order);
+      try {
+        await adapter.cancelOrder(orderId);
+        cancelledProviderOrderIds.add(orderId);
+      } catch (error) {
+        lastCancelErrors.push(`cancel ${orderId} failed: ${errorMessage(error)}`);
+      }
+    }
+
+    await delay(PROPR_SHUTDOWN_SETTLE_MS);
+  }
+
+  try {
+    remainingOrders = await getTrackedOpenProviderOrders(bot, adapter);
+  } catch (error) {
+    return {
+      cancelledProviderOrderIds: [...cancelledProviderOrderIds],
+      remainingProviderOrderIds: remainingOrders.map(providerOrderId),
+      errors: [`final open order verification failed: ${errorMessage(error)}`],
+    };
+  }
+
+  const remainingProviderOrderIds = remainingOrders.map(providerOrderId);
+  return {
+    cancelledProviderOrderIds: [...cancelledProviderOrderIds],
+    remainingProviderOrderIds,
+    errors:
+      remainingProviderOrderIds.length > 0
+        ? [...lastCancelErrors, `${remainingProviderOrderIds.length} tracked Propr orders could not be cancelled.`]
+        : [],
+  };
+}
+
+async function getTrackedOpenProviderOrders(bot: Bot, adapter: ProprExecutionAdapter): Promise<ExecutionOrder[]> {
+  const trackedOrders = listOrders(bot.id);
+  const providerOrderIds = new Set(trackedOrders.map((order) => order.provider_order_id ?? order.id));
+  const intentIds = new Set(trackedOrders.map((order) => order.intent_id));
+  const providerOrders = await adapter.getOpenOrders(bot.config.pair);
+
+  return providerOrders.filter(
+    (order) => providerOrderIds.has(providerOrderId(order)) || intentIds.has(order.intentId),
+  );
+}
+
+function providerOrderId(order: ExecutionOrder): string {
+  return order.providerOrderId ?? order.id;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function verifyPositionReduction(
+  bot: Bot,
+  adapter: ProprExecutionAdapter,
+  quantityBefore: ReturnType<typeof decimal>,
+  closeQuantity: ReturnType<typeof decimal>,
+  closeEntirePosition: boolean,
+): Promise<{ ok: boolean; remainingQuantity: ReturnType<typeof decimal> }> {
+  const expectedMaximum = closeEntirePosition ? decimal(0) : quantityBefore.minus(closeQuantity);
+  let remainingQuantity = quantityBefore;
+
+  for (let pass = 0; pass < PROPR_SHUTDOWN_CANCEL_PASSES; pass += 1) {
+    const positions = await adapter.getPositions(bot.config.pair);
+    const matchingPosition = positions.find(
+      (position) => position.asset === bot.config.pair && position.positionSide === bot.config.positionSide,
+    );
+    remainingQuantity = matchingPosition ? decimal(matchingPosition.quantity) : decimal(0);
+    if (remainingQuantity.lte(expectedMaximum)) return { ok: true, remainingQuantity };
+    await delay(PROPR_SHUTDOWN_SETTLE_MS);
+  }
+
+  return { ok: false, remainingQuantity };
 }
 
 export async function triggerProprEmergencyStop(
@@ -830,6 +1027,9 @@ export async function reconcileProprBot(id: string, ownerUser?: string): Promise
   if (bot.config.mode !== "propr_live") {
     throw new Error("Only Propr challenge bots can use Propr reconciliation.");
   }
+  if (!isActiveProprRuntimeBot(bot)) {
+    return { syncedOrders: 0, insertedFills: 0, placedGridOrders: 0, staleOpenOrders: 0 };
+  }
 
   const adapter = createProprExecutionAdapter(bot.ownerUser);
   const safetyStopTriggered = await enforceProprChallengeSafetyStop(bot, adapter);
@@ -842,6 +1042,9 @@ export async function reconcileProprBot(id: string, ownerUser?: string): Promise
     adapter.getTrades(bot.config.pair),
     adapter.getPositions(bot.config.pair),
   ]);
+  if (!isProprGridPlacementAllowed(bot.id, bot.ownerUser)) {
+    return { syncedOrders: 0, insertedFills: 0, placedGridOrders: 0, staleOpenOrders: 0 };
+  }
   const matchingPosition = positions.find(
     (position) => position.asset === bot.config.pair && position.positionSide === bot.config.positionSide,
   );
@@ -905,7 +1108,8 @@ export async function reconcileProprBot(id: string, ownerUser?: string): Promise
       insertedFills += result.changes;
     }
 
-    const placedGridOrder = !exitEvaluation?.trigger && hasGridLevelIndex(order)
+    const placedGridOrder =
+      !exitEvaluation?.trigger && hasGridLevelIndex(order) && isProprGridPlacementAllowed(bot.id, bot.ownerUser)
       ? await placePairedGridOrderIfMissing(bot, adapter, order, listOrders(bot.id), openProviderIds)
       : null;
     if (placedGridOrder) placedGridOrders += 1;
@@ -931,6 +1135,10 @@ export async function reconcileProprBot(id: string, ownerUser?: string): Promise
       bot.ownerUser,
     );
     return { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders, exitTrigger: exitEvaluation.trigger };
+  }
+
+  if (!isProprGridPlacementAllowed(bot.id, bot.ownerUser)) {
+    return { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders };
   }
 
   const repairedGridOrders = await repairMissingGridOrders(bot, adapter, openProviderIds);
@@ -990,6 +1198,7 @@ async function repairMissingGridOrders(
   const filledGridOrders = knownOrders.filter((order) => order.status === "filled" && hasGridLevelIndex(order));
 
   for (const filledOrder of filledGridOrders) {
+    if (!isProprGridPlacementAllowed(bot.id, bot.ownerUser)) break;
     const placedGridOrder = await placePairedGridOrderIfMissing(bot, adapter, filledOrder, knownOrders, openProviderIds);
     if (!placedGridOrder) continue;
     placedGridOrders += 1;
@@ -1006,6 +1215,8 @@ async function placePairedGridOrderIfMissing(
   knownOrders: PersistedOrder[],
   openProviderIds: Set<string>,
 ): Promise<ExecutionOrder | null> {
+  if (!isProprGridPlacementAllowed(bot.id, bot.ownerUser)) return null;
+
   const nextIntent = pairedOrder(bot.config, filledOrder);
   const existingGridOrder = knownOrders.some(
     (order) =>
@@ -1111,6 +1322,10 @@ async function executeProprAccountEmergencyStop(
   let positions: ExecutionPosition[] = [];
   let closeOrders = 0;
 
+  for (const bot of activeLiveBots) {
+    markBotClosing(bot, options.reason);
+  }
+
   try {
     cancelledOrders = await adapter.cancelAll();
     cancelAllSucceeded = true;
@@ -1207,6 +1422,11 @@ async function executeProprAccountEmergencyStop(
 
 function isActiveProprRuntimeBot(bot: Bot): boolean {
   return bot.config.mode === "propr_live" && ["live", "running", "out_of_range"].includes(bot.status);
+}
+
+function isProprGridPlacementAllowed(botId: string, ownerUser: string): boolean {
+  const current = getBot(botId, ownerUser);
+  return Boolean(current && isActiveProprRuntimeBot(current));
 }
 
 function errorMessage(error: unknown): string {
@@ -1799,6 +2019,29 @@ function executedOrderQuantity(order: PersistedOrder) {
 
 function DecimalMin(a: ReturnType<typeof decimal>, b: ReturnType<typeof decimal>) {
   return a.lte(b) ? a : b;
+}
+
+async function syncTradesForPersistedOrders(bot: Bot, adapter: ProprExecutionAdapter): Promise<number> {
+  const orders = listOrders(bot.id).map((order): ExecutionOrder => ({
+    id: order.id,
+    providerOrderId: order.provider_order_id ?? undefined,
+    intentId: order.intent_id,
+    botId: order.bot_id ?? undefined,
+    gridLevelId: order.grid_level_id ?? undefined,
+    asset: order.asset,
+    side: order.side,
+    positionSide: order.position_side,
+    type: order.type,
+    quantity: order.quantity,
+    price: order.price ?? undefined,
+    status: order.status,
+    cumulativeQuantity: order.cumulative_quantity,
+    averageFillPrice: order.average_fill_price ?? undefined,
+    reduceOnly: Boolean(order.reduce_only),
+    createdAt: order.created_at,
+    updatedAt: order.updated_at,
+  }));
+  return syncTradesForPlacedOrders(bot, adapter, orders);
 }
 
 async function syncTradesForPlacedOrders(

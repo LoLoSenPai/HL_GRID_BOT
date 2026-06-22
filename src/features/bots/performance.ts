@@ -58,7 +58,9 @@ export function getBotPerformanceRows(bots: Bot[]): BotPerformanceSummary[] {
 }
 
 function deriveStateLabel(bot: Bot, openOrders: number, filledOrders: number, fillCount: number) {
-  if (["stopped", "paused", "error", "out_of_range"].includes(bot.status)) return bot.status.replaceAll("_", " ");
+  if (["stopped", "paused", "closing", "error", "out_of_range"].includes(bot.status)) {
+    return bot.status.replaceAll("_", " ");
+  }
   if (fillCount > 0 && openOrders > 0) return "in market";
   if (filledOrders > 0) return "filled";
   if (openOrders > 0) return "waiting fill";
