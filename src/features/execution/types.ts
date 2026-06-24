@@ -25,6 +25,7 @@ export interface OrderIntent {
   quantity: DecimalString;
   price?: DecimalString;
   triggerPrice?: DecimalString;
+  positionId?: string;
   timeInForce?: TimeInForce;
   reduceOnly?: boolean;
   closePosition?: boolean;

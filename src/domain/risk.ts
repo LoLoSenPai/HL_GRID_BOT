@@ -129,6 +129,14 @@ export function validateBotConfig(
     });
   }
 
+  if (config.mode === "propr_live" && (!config.stopLoss || !isPositiveDecimal(config.stopLoss))) {
+    issues.push({
+      code: "native_stop_loss_required",
+      severity: "error",
+      message: "A valid stop loss is required before deploying a Propr challenge bot.",
+    });
+  }
+
   if (config.autoRecenter) {
     issues.push({
       code: "auto_recenter",

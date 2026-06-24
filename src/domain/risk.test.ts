@@ -30,6 +30,11 @@ describe("risk manager", () => {
     expect(issues.some((issue) => issue.code === "leverage_limit")).toBe(true);
   });
 
+  it("blocks a Propr challenge deployment without a native stop loss", () => {
+    const issues = validateBotConfig({ ...config, mode: "propr_live", stopLoss: undefined });
+    expect(issues.some((issue) => issue.code === "native_stop_loss_required")).toBe(true);
+  });
+
   it("rejects small non-reducing orders", () => {
     const issues = validateOrderIntent({
       asset: "BTC",

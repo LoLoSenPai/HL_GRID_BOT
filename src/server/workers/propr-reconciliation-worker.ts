@@ -2,16 +2,25 @@ import { pathToFileURL } from "node:url";
 
 import WebSocket from "ws";
 
-import { getSetting, listBots, listEvents, reconcileProprBot, setSetting } from "@/features/bots/repository";
+import {
+  checkProprAccountSafety,
+  getSetting,
+  listBots,
+  listEvents,
+  reconcileProprBot,
+  setSetting,
+} from "@/features/bots/repository";
 import { recordProprWsPositionEvent } from "@/features/propr/ws-position-cache";
 import { getEnv } from "@/lib/env";
 
 const PROPR_WORKER_HEARTBEAT_KEY = "propr_worker_heartbeat";
 const PROPR_WORKER_WS_STATUS_KEY = "propr_worker_ws_status";
+const PROPR_SAFETY_HEARTBEAT_KEY = "propr_safety_heartbeat";
 const PROPR_WORKER_STALE_MS = 30_000;
 const PROPR_WS_RECONNECT_MS = 5_000;
-const PROPR_WS_RECONCILE_DEBOUNCE_MS = 750;
+const PROPR_WS_RECONCILE_THROTTLE_MS = 100;
 const PROPR_WS_ACTIONABLE_EVENTS = new Set([
+  "account.updated",
   "order.created",
   "order.updated",
   "order.cancelled",
@@ -19,6 +28,7 @@ const PROPR_WS_ACTIONABLE_EVENTS = new Set([
   "order.filled",
   "order.partially_filled",
   "position.opened",
+  "position.updated",
   "position.closed",
   "position.liquidated",
   "position.take_profit.hit",
@@ -171,8 +181,11 @@ export function getProprWorkerStatus(): ProprWorkerStatus {
 }
 
 async function runLoop() {
-  const intervalMs = Number(process.env.PROPR_WORKER_INTERVAL_MS ?? "10000");
+  const intervalMs = Number(process.env.PROPR_WORKER_INTERVAL_MS ?? "2000");
+  const safetyIntervalMs = Number(process.env.PROPR_SAFETY_INTERVAL_MS ?? "1000");
   let syncInFlight: Promise<void> | null = null;
+  let safetyInFlight: Promise<void> | null = null;
+  let lastSafetyHeartbeatAt = 0;
   let wsSyncTimer: NodeJS.Timeout | null = null;
 
   const runWorkerSync = async (trigger: "interval" | "propr_ws", eventType?: string) => {
@@ -196,12 +209,51 @@ async function runLoop() {
   };
 
   startProprWebSocketListener((eventType) => {
-    if (wsSyncTimer) clearTimeout(wsSyncTimer);
+    if (wsSyncTimer) return;
     wsSyncTimer = setTimeout(() => {
       wsSyncTimer = null;
       void runWorkerSync("propr_ws", eventType);
-    }, PROPR_WS_RECONCILE_DEBOUNCE_MS);
+    }, PROPR_WS_RECONCILE_THROTTLE_MS);
   });
+
+  const runSafetyCheck = () => {
+    if (safetyInFlight) return safetyInFlight;
+    safetyInFlight = (async () => {
+      const activeBots = listBots().filter(
+        (bot) => bot.config.mode === "propr_live" && ["live", "running", "out_of_range"].includes(bot.status),
+      );
+      const owners = [...new Set(activeBots.map((bot) => bot.ownerUser))];
+      const errors: Array<{ ownerUser: string; message: string }> = [];
+      let triggered = 0;
+
+      for (const ownerUser of owners) {
+        try {
+          if (await checkProprAccountSafety(ownerUser)) triggered += 1;
+        } catch (error) {
+          errors.push({
+            ownerUser,
+            message: error instanceof Error ? error.message : "Unknown Propr safety monitor error",
+          });
+        }
+      }
+
+      const at = new Date().toISOString();
+      if (triggered > 0 || errors.length > 0 || Date.now() - lastSafetyHeartbeatAt >= 5_000) {
+        setSetting(PROPR_SAFETY_HEARTBEAT_KEY, JSON.stringify({ at, owners: owners.length, triggered, errors }));
+        lastSafetyHeartbeatAt = Date.now();
+      }
+      if (triggered > 0 || errors.length > 0) {
+        console.log(JSON.stringify({ at, trigger: "safety_monitor", owners: owners.length, triggered, errors }));
+      }
+    })().finally(() => {
+      safetyInFlight = null;
+    });
+    return safetyInFlight;
+  };
+
+  void runSafetyCheck();
+  const safetyTimer = setInterval(() => void runSafetyCheck(), Math.max(250, safetyIntervalMs));
+  process.once("SIGTERM", () => clearInterval(safetyTimer));
 
   while (true) {
     await runWorkerSync("interval");

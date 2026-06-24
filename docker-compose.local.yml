@@ -39,7 +39,8 @@ services:
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
       DATABASE_URL: file:/app/data/hl_grid_bot.sqlite
-      PROPR_WORKER_INTERVAL_MS: "10000"
+      PROPR_WORKER_INTERVAL_MS: "2000"
+      PROPR_SAFETY_INTERVAL_MS: "1000"
     volumes:
       - hl-grid-bot-data:/app/data
     command: ["npm", "run", "worker:propr"]

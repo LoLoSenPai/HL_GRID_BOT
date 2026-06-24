@@ -136,6 +136,7 @@ export class ProprClient {
   private readonly timeoutMs: number;
   private readonly selectedAccountId?: string;
   private readonly selectedAccountIdName: string;
+  private setupPromise: Promise<string> | null = null;
   accountId: string | null = null;
 
   constructor(options: ProprClientOptions = {}) {
@@ -151,8 +152,21 @@ export class ProprClient {
     }
   }
 
-  async setup(accountId?: string): Promise<string> {
-    const attempts = await this.getChallengeAttempts({ status: "active" });
+  async setup(accountId?: string, knownAttempts?: ProprChallengeAttempt[]): Promise<string> {
+    if (!accountId && this.accountId) return this.accountId;
+    if (!accountId && this.setupPromise) return this.setupPromise;
+
+    const setup = this.resolveAccountId(accountId, knownAttempts);
+    if (accountId) return setup;
+
+    this.setupPromise = setup.finally(() => {
+      this.setupPromise = null;
+    });
+    return this.setupPromise;
+  }
+
+  private async resolveAccountId(accountId?: string, knownAttempts?: ProprChallengeAttempt[]): Promise<string> {
+    const attempts = knownAttempts ?? (await this.getChallengeAttempts({ status: "active" }));
     const selectedAccountId = accountId ?? this.selectedAccountId;
 
     if (selectedAccountId) {
@@ -244,6 +258,7 @@ export class ProprClient {
 
     if (intent.price) order.price = intent.price;
     if (intent.triggerPrice) order.triggerPrice = intent.triggerPrice;
+    if (intent.positionId) order.positionId = intent.positionId;
 
     const response = await this.request<{ data: ProprOrder[] }>(
       "POST",
@@ -364,6 +379,5 @@ export function accountIdMatches(accountId: string | undefined, selectedAccountI
 }
 
 export function proprPositionSideForIntent(intent: OrderIntent): string {
-  if (!intent.reduceOnly) return intent.positionSide;
-  return intent.side === "buy" ? "long" : "short";
+  return intent.positionSide;
 }

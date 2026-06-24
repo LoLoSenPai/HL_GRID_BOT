@@ -13,6 +13,17 @@ import { resolveDailyEquityBaseline } from "@/features/propr/daily-equity-baseli
 import { getProprEnvForUser } from "@/lib/env";
 import { logger } from "@/lib/logger";
 
+const PROPR_CONTEXT_TTL_MS = 30_000;
+
+interface ProprChallengeContext {
+  client: ReturnType<typeof createProprClient>;
+  attempt: ProprChallengeAttempt;
+  expiresAt: number;
+}
+
+const challengeContexts = new Map<string, ProprChallengeContext>();
+const challengeContextLoads = new Map<string, Promise<ProprChallengeContext>>();
+
 export interface ProprChallengeSummary {
   source: "propr_live" | "local_fallback";
   checkedAt: string;
@@ -39,33 +50,59 @@ export interface ProprChallengeSummary {
   warning?: string;
 }
 
-export async function getProprChallengeSummary(metrics: RuntimeMetrics, ownerUser?: string): Promise<ProprChallengeSummary> {
+export async function getProprChallengeSummary(
+  metrics: RuntimeMetrics,
+  ownerUser?: string,
+  options: { fallbackOnError?: boolean } = {},
+): Promise<ProprChallengeSummary> {
   const env = getProprEnvForUser(ownerUser);
 
   if (!env.PROPR_API_KEY) {
+    if (options.fallbackOnError === false) throw new Error("Propr API key is not configured.");
     return localFallbackSummary(metrics, "Propr API key is not configured.");
   }
 
   try {
-    const client = createProprClient({ ownerUser });
-    const attempts = await client.getChallengeAttempts({ status: "active" });
-    if (!attempts[0]?.accountId) {
-      return localFallbackSummary(metrics, "No active Propr challenge account found.");
-    }
-
-    const accountId = await client.setup();
-    const attempt = attempts.find((activeAttempt) => activeAttempt.accountId === accountId) ?? attempts[0];
-    const [account, detailedAttempt] = await Promise.all([
-      client.getAccount(),
-      attempt.attemptId ? client.getChallengeAttempt(attempt.attemptId).catch(() => attempt) : Promise.resolve(attempt),
-    ]);
-
-    return buildSummaryFromPropr(account, detailedAttempt);
+    const context = await getChallengeContext(ownerUser);
+    const account = await context.client.getAccount();
+    return buildSummaryFromPropr(account, context.attempt);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown Propr challenge error";
+    if (options.fallbackOnError === false) throw error;
     logger.warn("propr.challenge_summary_fallback", { error: message });
     return localFallbackSummary(metrics, message);
   }
+}
+
+async function getChallengeContext(ownerUser?: string): Promise<ProprChallengeContext> {
+  const key = ownerUser ?? "__default__";
+  const cached = challengeContexts.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached;
+
+  const existingLoad = challengeContextLoads.get(key);
+  if (existingLoad) return existingLoad;
+
+  const load = (async () => {
+    const client = createProprClient({ ownerUser, timeoutMs: 5_000 });
+    const attempts = await client.getChallengeAttempts({ status: "active" });
+    if (!attempts[0]?.accountId) {
+      throw new Error("No active Propr challenge account found.");
+    }
+
+    const accountId = await client.setup(undefined, attempts);
+    const attempt = attempts.find((activeAttempt) => activeAttempt.accountId === accountId) ?? attempts[0];
+    const detailedAttempt = attempt.attemptId
+      ? await client.getChallengeAttempt(attempt.attemptId).catch(() => attempt)
+      : attempt;
+    const context = { client, attempt: detailedAttempt, expiresAt: Date.now() + PROPR_CONTEXT_TTL_MS };
+    challengeContexts.set(key, context);
+    return context;
+  })().finally(() => {
+    challengeContextLoads.delete(key);
+  });
+
+  challengeContextLoads.set(key, load);
+  return load;
 }
 
 function buildSummaryFromPropr(

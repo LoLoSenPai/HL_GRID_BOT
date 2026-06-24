@@ -14,18 +14,21 @@ import type {
   RuntimeMetrics,
   TradingMode,
   PositionSide,
+  OrderType,
 } from "@/domain/types";
 import { validateBotConfig } from "@/domain/risk";
 import { getSqlite } from "@/db/client";
 import { ensureDatabase } from "@/db/init";
 import { defaultBotConfig } from "@/features/bots/sample-data";
 import { buildChallengeRiskPreflight, type ChallengeRiskPreflight } from "@/features/bots/challenge-risk";
+import { evaluateChallengeSafety } from "@/features/bots/runtime-safety";
 import { PaperGridEngine } from "@/features/paper-trading/engine";
 import { createProprExecutionAdapter, ProprExecutionAdapter } from "@/features/execution/propr-adapter";
 import type { ExecutionOrder, ExecutionPosition } from "@/features/execution/types";
 import { getMarketSnapshots } from "@/features/market-data/service";
 import { getProprChallengeSummary, type ProprChallengeSummary } from "@/features/propr/challenge-summary";
 import { checkProprLiveReadiness } from "@/features/propr/readiness";
+import { mergeProprWsPositionSnapshots } from "@/features/propr/ws-position-cache";
 import { getDefaultBotOwnerUser } from "@/lib/auth/session";
 
 interface BotJoinedRow {
@@ -77,6 +80,8 @@ interface RuntimeStateRow {
 const LEGACY_SAMPLE_BOT_IDS = ["bot_btc_range_v1", "bot_eth_compact", "bot_sol_lab"];
 const PROPR_SHUTDOWN_CANCEL_PASSES = 5;
 const PROPR_SHUTDOWN_SETTLE_MS = 200;
+const PROPR_POSITION_READY_PASSES = 10;
+const proprSafetyChecks = new Map<string, Promise<boolean>>();
 
 export interface PersistedOrder {
   id: string;
@@ -87,7 +92,7 @@ export interface PersistedOrder {
   asset: MarketSymbol;
   side: OrderSide;
   position_side: "long" | "short";
-  type: "market" | "limit";
+  type: OrderType;
   status: "pending" | "open" | "partially_filled" | "filled" | "cancelled" | "rejected";
   quantity: string;
   price: string | null;
@@ -493,6 +498,23 @@ export async function startProprBot(id: string, ownerUser?: string) {
   const placedOrders: ExecutionOrder[] = [];
   let initialInventoryOrder: ExecutionOrder | null = null;
   try {
+    const initialInventoryQuantity = sumLevelQuantities(reduceOnlyLevels);
+    initialInventoryOrder = await adapter.placeOrder({
+      clientOrderId: ulid(),
+      botId: bot.id,
+      gridLevelId: `${bot.config.pair}-initial-${referencePrice}`,
+      asset: bot.config.pair,
+      side: bot.config.positionSide === "long" ? "buy" : "sell",
+      positionSide: bot.config.positionSide,
+      type: "market",
+      quantity: initialInventoryQuantity,
+      timeInForce: "IOC",
+      reduceOnly: false,
+    });
+    placedOrders.push(initialInventoryOrder);
+
+    await placeNativeProtectiveOrders(adapter, bot, (order) => placedOrders.push(order));
+
     for (const level of entryLevels) {
       const order = await adapter.placeOrder({
         clientOrderId: ulid(),
@@ -509,21 +531,6 @@ export async function startProprBot(id: string, ownerUser?: string) {
       });
       placedOrders.push(order);
     }
-
-    const initialInventoryQuantity = sumLevelQuantities(reduceOnlyLevels);
-    initialInventoryOrder = await adapter.placeOrder({
-      clientOrderId: ulid(),
-      botId: bot.id,
-      gridLevelId: `${bot.config.pair}-initial-${referencePrice}`,
-      asset: bot.config.pair,
-      side: bot.config.positionSide === "long" ? "buy" : "sell",
-      positionSide: bot.config.positionSide,
-      type: "market",
-      quantity: initialInventoryQuantity,
-      timeInForce: "IOC",
-      reduceOnly: false,
-    });
-    placedOrders.push(initialInventoryOrder);
 
     for (const level of reduceOnlyLevels) {
       const order = await adapter.placeOrder({
@@ -577,12 +584,13 @@ export async function startProprBot(id: string, ownerUser?: string) {
       botId: bot.id,
       type: "bot.propr_started",
       severity: "success",
-      message: `${bot.name} deployed with initial inventory and ${placedOrders.length - 1} grid ladder orders.`,
+      message: `${bot.name} deployed with initial inventory, ${entryLevels.length + reduceOnlyLevels.length} grid orders and native protection.`,
       payload: {
         referencePrice,
         orderCount: placedOrders.length,
         entryOrders: entryLevels.length,
         reduceOnlyOrders: reduceOnlyLevels.length,
+        protectiveOrders: placedOrders.filter((order) => isProtectiveOrderType(order.type)).length,
         initialInventoryQuantity: initialInventoryOrder.quantity,
       },
     });
@@ -1032,12 +1040,12 @@ export async function reconcileProprBot(id: string, ownerUser?: string): Promise
   }
 
   const adapter = createProprExecutionAdapter(bot.ownerUser);
-  const safetyStopTriggered = await enforceProprChallengeSafetyStop(bot, adapter);
+  const safetyStopTriggered = await checkProprChallengeSafetyStop(bot.id, bot.ownerUser, adapter);
   if (safetyStopTriggered) {
     return { syncedOrders: 0, insertedFills: 0, placedGridOrders: 0, staleOpenOrders: 0, safetyStopTriggered: true };
   }
 
-  const [openProviderOrders, trades, positions] = await Promise.all([
+  const [openProviderOrders, trades, restPositions] = await Promise.all([
     adapter.getOpenOrders(bot.config.pair),
     adapter.getTrades(bot.config.pair),
     adapter.getPositions(bot.config.pair),
@@ -1045,6 +1053,7 @@ export async function reconcileProprBot(id: string, ownerUser?: string): Promise
   if (!isProprGridPlacementAllowed(bot.id, bot.ownerUser)) {
     return { syncedOrders: 0, insertedFills: 0, placedGridOrders: 0, staleOpenOrders: 0 };
   }
+  const positions = mergeProprWsPositionSnapshots(restPositions, bot.ownerUser);
   const matchingPosition = positions.find(
     (position) => position.asset === bot.config.pair && position.positionSide === bot.config.positionSide,
   );
@@ -1052,6 +1061,8 @@ export async function reconcileProprBot(id: string, ownerUser?: string): Promise
   const exitEvaluation = evaluateBotExitTrigger(bot.config, markPrice);
   const openProviderIds = new Set(openProviderOrders.map((order) => order.providerOrderId ?? order.id));
   const persistedOrders = listOrders(bot.id);
+  const nativeExitTrigger = detectNativeProtectiveFill(persistedOrders, trades);
+  const effectiveExitTrigger = nativeExitTrigger ?? exitEvaluation?.trigger ?? null;
   const now = new Date().toISOString();
   let syncedOrders = 0;
   let insertedFills = 0;
@@ -1109,51 +1120,134 @@ export async function reconcileProprBot(id: string, ownerUser?: string): Promise
     }
 
     const placedGridOrder =
-      !exitEvaluation?.trigger && hasGridLevelIndex(order) && isProprGridPlacementAllowed(bot.id, bot.ownerUser)
+      !effectiveExitTrigger && hasGridLevelIndex(order) && isProprGridPlacementAllowed(bot.id, bot.ownerUser)
       ? await placePairedGridOrderIfMissing(bot, adapter, order, listOrders(bot.id), openProviderIds)
       : null;
     if (placedGridOrder) placedGridOrders += 1;
   }
 
-  if (exitEvaluation?.trigger) {
-    const exitLabel = exitEvaluation.trigger === "stop_loss" ? "Stop loss" : "Take profit";
+  if (effectiveExitTrigger) {
+    const exitLabel = effectiveExitTrigger === "stop_loss" ? "Stop loss" : "Take profit";
+    const triggerPrice =
+      exitEvaluation?.triggerPrice ??
+      (effectiveExitTrigger === "stop_loss" ? bot.config.stopLoss : bot.config.takeProfit) ??
+      "unknown";
     addEvent({
       botId: bot.id,
-      type: exitEvaluation.trigger === "stop_loss" ? "bot.propr_stop_loss_triggered" : "bot.propr_take_profit_triggered",
+      type: effectiveExitTrigger === "stop_loss" ? "bot.propr_stop_loss_triggered" : "bot.propr_take_profit_triggered",
       severity: "warning",
-      message: `${exitLabel} triggered for ${formatMarketSymbol(bot.config.pair)} ${bot.config.positionSide}: mark ${exitEvaluation.markPrice}, level ${exitEvaluation.triggerPrice}.`,
+      message: nativeExitTrigger
+        ? `Native Propr ${exitLabel.toLowerCase()} filled for ${formatMarketSymbol(bot.config.pair)} ${bot.config.positionSide}.`
+        : `${exitLabel} triggered for ${formatMarketSymbol(bot.config.pair)} ${bot.config.positionSide}: mark ${exitEvaluation?.markPrice}, level ${triggerPrice}.`,
       payload: {
-        trigger: exitEvaluation.trigger,
-        markPrice: exitEvaluation.markPrice,
-        triggerPrice: exitEvaluation.triggerPrice,
+        trigger: effectiveExitTrigger,
+        source: nativeExitTrigger ? "propr_native_order" : "worker_mark_price",
+        markPrice: exitEvaluation?.markPrice ?? markPrice,
+        triggerPrice,
         positionSide: bot.config.positionSide,
       },
     });
     await closeBot(
       bot.id,
-      `${exitLabel} triggered at mark ${exitEvaluation.markPrice} against level ${exitEvaluation.triggerPrice}.`,
+      nativeExitTrigger
+        ? `Native Propr ${exitLabel.toLowerCase()} filled.`
+        : `${exitLabel} triggered at mark ${exitEvaluation?.markPrice} against level ${triggerPrice}.`,
       bot.ownerUser,
     );
-    return { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders, exitTrigger: exitEvaluation.trigger };
+    return { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders, exitTrigger: effectiveExitTrigger };
   }
 
   if (!isProprGridPlacementAllowed(bot.id, bot.ownerUser)) {
     return { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders };
   }
 
+  let repairedProtectiveOrders = 0;
+  if (matchingPosition) {
+    try {
+      repairedProtectiveOrders = await ensureNativeProtectiveOrders(
+        bot,
+        adapter,
+        matchingPosition,
+        openProviderIds,
+      );
+    } catch (error) {
+      const message = `Native Propr protection could not be guaranteed: ${errorMessage(error)}`;
+      addEvent({
+        botId: bot.id,
+        type: "bot.propr_protection_failed",
+        severity: "error",
+        message,
+      });
+      await closeBot(bot.id, message, bot.ownerUser);
+      return { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders, safetyStopTriggered: true };
+    }
+  }
+
   const repairedGridOrders = await repairMissingGridOrders(bot, adapter, openProviderIds);
   placedGridOrders += repairedGridOrders;
 
   updateRuntimeFromAggregates(bot.id, markPrice ?? midpoint(bot.config));
-  addEvent({
-    botId: bot.id,
-    type: "bot.propr_reconciled",
-    severity: "success",
-    message: `Propr sync complete: ${syncedOrders} filled orders, ${insertedFills} new fills, ${placedGridOrders} grid orders, ${staleOpenOrders} stale locals.`,
-    payload: { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders },
-  });
+  if (
+    syncedOrders > 0 ||
+    insertedFills > 0 ||
+    placedGridOrders > 0 ||
+    repairedProtectiveOrders > 0 ||
+    staleOpenOrders > 0 ||
+    shouldEmitIdleProprSync(bot.id)
+  ) {
+    addEvent({
+      botId: bot.id,
+      type: "bot.propr_reconciled",
+      severity: "success",
+      message: `Propr sync complete: ${syncedOrders} filled orders, ${insertedFills} new fills, ${placedGridOrders} grid orders, ${repairedProtectiveOrders} protections, ${staleOpenOrders} stale locals.`,
+      payload: { syncedOrders, insertedFills, placedGridOrders, repairedProtectiveOrders, staleOpenOrders },
+    });
+  }
 
   return { syncedOrders, insertedFills, placedGridOrders, staleOpenOrders };
+}
+
+export async function checkProprAccountSafety(ownerUser: string): Promise<boolean> {
+  const bot = listBots(ownerUser)
+    .filter(isActiveProprRuntimeBot)
+    .sort((left, right) =>
+      decimal(left.config.challengeDailyLossStopPct ?? "2.75").cmp(
+        decimal(right.config.challengeDailyLossStopPct ?? "2.75"),
+      ),
+    )[0];
+  if (!bot) return false;
+  return checkProprChallengeSafetyStop(bot.id, bot.ownerUser);
+}
+
+export async function checkProprChallengeSafetyStop(
+  id: string,
+  ownerUser?: string,
+  adapter?: ProprExecutionAdapter,
+): Promise<boolean> {
+  const bot = getBot(id, ownerUser);
+  if (!bot || !isActiveProprRuntimeBot(bot)) return false;
+
+  const key = bot.ownerUser;
+  const inFlight = proprSafetyChecks.get(key);
+  if (inFlight) return inFlight;
+
+  const check = enforceProprChallengeSafetyStop(
+    bot,
+    adapter ?? createProprExecutionAdapter(bot.ownerUser, { timeoutMs: 5_000 }),
+  ).finally(() => {
+    proprSafetyChecks.delete(key);
+  });
+  proprSafetyChecks.set(key, check);
+  return check;
+}
+
+function shouldEmitIdleProprSync(botId: string): boolean {
+  const latest = getSqlite()
+    .prepare("SELECT created_at FROM events WHERE bot_id = ? AND type = 'bot.propr_reconciled' ORDER BY created_at DESC LIMIT 1")
+    .get(botId) as { created_at: string } | undefined;
+  if (!latest) return true;
+  const ageMs = Date.now() - Date.parse(latest.created_at);
+  return !Number.isFinite(ageMs) || ageMs >= 60_000;
 }
 
 function markStaleLocalOpenOrdersCancelled(
@@ -1267,20 +1361,27 @@ function blocksPairedGridReplacement(
 }
 
 async function enforceProprChallengeSafetyStop(bot: Bot, adapter: ProprExecutionAdapter): Promise<boolean> {
-  const challenge = await getProprChallengeSummary(getRuntimeMetrics(bot.ownerUser), bot.ownerUser);
+  const challenge = await getProprChallengeSummary(getRuntimeMetrics(bot.ownerUser), bot.ownerUser, {
+    fallbackOnError: false,
+  });
   if (challenge.source !== "propr_live") return false;
 
   const equity = decimal(challenge.equity);
   const dailyStopPct = decimal(bot.config.challengeDailyLossStopPct ?? "2.75");
-  const dailyStopAmount = decimal(challenge.startingBalance).mul(dailyStopPct).div(100);
-  const dailyFloor = decimal(challenge.dayStartEquity).minus(dailyStopAmount);
-  const drawdownFloor = decimal(challenge.drawdownLimit);
-  const breachedSafetyFloor = equity.lte(dailyFloor) || equity.lte(drawdownFloor);
-  if (!breachedSafetyFloor) return false;
+  const dailyLossUsed = decimal(challenge.dailyLossUsed);
+  const safety = evaluateChallengeSafety({
+    startingBalance: challenge.startingBalance,
+    equity: challenge.equity,
+    dayStartEquity: challenge.dayStartEquity,
+    dailyLossUsed: challenge.dailyLossUsed,
+    dailyStopPct: toDecimalString(dailyStopPct, 8),
+    drawdownFloor: challenge.drawdownLimit,
+  });
+  if (!safety.breached) return false;
 
-  const reason = equity.lte(dailyFloor)
-    ? `Challenge equity ${toDecimalString(equity, 2)} reached the ${toDecimalString(dailyStopPct, 2)}% daily stop floor ${toDecimalString(dailyFloor, 2)}.`
-    : `Challenge equity ${toDecimalString(equity, 2)} reached drawdown floor ${toDecimalString(drawdownFloor, 2)}.`;
+  const reason = safety.dailyLossBreached || safety.dailyEquityFloorBreached
+    ? `Challenge daily loss ${toDecimalString(dailyLossUsed, 2)} reached the ${toDecimalString(dailyStopPct, 2)}% safety budget ${safety.dailyStopAmount} at equity ${toDecimalString(equity, 2)}.`
+    : `Challenge equity ${toDecimalString(equity, 2)} reached drawdown floor ${challenge.drawdownLimit}.`;
   await executeProprAccountEmergencyStop(adapter, {
     reason,
     challenge,
@@ -1289,8 +1390,10 @@ async function enforceProprChallengeSafetyStop(bot: Bot, adapter: ProprExecution
     eventType: "bot.propr_safety_stop",
     extraPayload: {
       equity: challenge.equity,
-      dailyFloor: toDecimalString(dailyFloor, 2),
-      drawdownFloor: toDecimalString(drawdownFloor, 2),
+      dailyLossUsed: challenge.dailyLossUsed,
+      dailyStopAmount: safety.dailyStopAmount,
+      dailyFloor: safety.dailyFloor,
+      drawdownFloor: challenge.drawdownLimit,
     },
   });
 
@@ -1308,7 +1411,6 @@ async function executeProprAccountEmergencyStop(
     extraPayload?: Record<string, unknown>;
   },
 ): Promise<ProprEmergencyStopSummary> {
-  const now = new Date().toISOString();
   const activeLiveBots = listBots(options.ownerUser).filter(isActiveProprRuntimeBot);
   const stoppedBotIds = activeLiveBots.length
     ? activeLiveBots.map((item) => item.id)
@@ -1319,59 +1421,80 @@ async function executeProprAccountEmergencyStop(
   const errors: string[] = [];
   let cancelledOrders: ExecutionOrder[] = [];
   let cancelAllSucceeded = false;
-  let positions: ExecutionPosition[] = [];
+  const positionIdsFound = new Set<string>();
   let closeOrders = 0;
 
   for (const bot of activeLiveBots) {
     markBotClosing(bot, options.reason);
   }
 
-  try {
-    cancelledOrders = await adapter.cancelAll();
-    cancelAllSucceeded = true;
-  } catch (error) {
-    errors.push(`cancelAll failed: ${errorMessage(error)}`);
-  }
+  const cancellation = adapter
+    .cancelAll()
+    .then((orders) => {
+      cancelledOrders = orders;
+      cancelAllSucceeded = true;
+    })
+    .catch((error) => {
+      errors.push(`cancelAll failed: ${errorMessage(error)}`);
+    });
 
-  try {
-    positions = await adapter.getPositions();
-  } catch (error) {
-    errors.push(`position sync failed: ${errorMessage(error)}`);
-  }
-
-  for (const position of positions) {
+  const closeOpenPositions = async () => {
+    let positions: ExecutionPosition[];
     try {
-      await adapter.placeOrder({
-        clientOrderId: ulid(),
-        botId: referenceBotId,
-        asset: position.asset,
-        side: position.positionSide === "long" ? "sell" : "buy",
-        positionSide: position.positionSide,
-        type: "market",
-        quantity: position.quantity,
-        timeInForce: "IOC",
-        reduceOnly: true,
-        closePosition: true,
-      });
-      closeOrders += 1;
+      positions = await adapter.getPositions();
     } catch (error) {
-      errors.push(`close ${formatMarketSymbol(position.asset)} ${position.positionSide} failed: ${errorMessage(error)}`);
+      errors.push(`position sync failed: ${errorMessage(error)}`);
+      return 0;
     }
+
+    for (const position of positions) {
+      positionIdsFound.add(position.providerPositionId ?? position.id);
+      try {
+        await adapter.placeOrder({
+          clientOrderId: ulid(),
+          botId: referenceBotId,
+          asset: position.asset,
+          side: position.positionSide === "long" ? "sell" : "buy",
+          positionSide: position.positionSide,
+          type: "market",
+          quantity: position.quantity,
+          positionId: position.providerPositionId,
+          timeInForce: "IOC",
+          reduceOnly: true,
+          closePosition: true,
+        });
+        closeOrders += 1;
+      } catch (error) {
+        errors.push(`close ${formatMarketSymbol(position.asset)} ${position.positionSide} failed: ${errorMessage(error)}`);
+      }
+    }
+    return positions.length;
+  };
+
+  await closeOpenPositions();
+  await cancellation;
+
+  for (let pass = 0; pass < 2; pass += 1) {
+    await delay(PROPR_SHUTDOWN_SETTLE_MS);
+    const remaining = await closeOpenPositions();
+    if (remaining === 0) break;
+    if (pass === 1) errors.push(`${remaining} Propr position(s) remain open after emergency close attempts.`);
   }
 
   const ok = errors.length === 0;
   const nextStatus: BotStatus = ok ? "stopped" : "error";
+  const completedAt = new Date().toISOString();
   const tx = getSqlite().transaction(() => {
     for (const botId of stoppedBotIds) {
       if (cancelAllSucceeded) {
         getSqlite()
           .prepare("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE bot_id = ? AND status = 'open'")
-          .run(now, botId);
+          .run(completedAt, botId);
       }
-      getSqlite().prepare("UPDATE bots SET status = ?, updated_at = ? WHERE id = ?").run(nextStatus, now, botId);
+      getSqlite().prepare("UPDATE bots SET status = ?, updated_at = ? WHERE id = ?").run(nextStatus, completedAt, botId);
       getSqlite()
         .prepare("UPDATE bot_runtime_state SET state = ?, equity = ?, pnl = ?, updated_at = ? WHERE bot_id = ?")
-        .run(nextStatus, options.challenge?.equity ?? "0", options.challenge?.realizedPnl ?? "0", now, botId);
+        .run(nextStatus, options.challenge?.equity ?? "0", options.challenge?.realizedPnl ?? "0", completedAt, botId);
       addEvent({
         botId,
         type: options.eventType,
@@ -1382,7 +1505,7 @@ async function executeProprAccountEmergencyStop(
         payload: {
           ...options.extraPayload,
           cancelledOrders: cancelledOrders.length,
-          positionsFound: positions.length,
+          positionsFound: positionIdsFound.size,
           closeOrders,
           errors,
         },
@@ -1399,7 +1522,7 @@ async function executeProprAccountEmergencyStop(
         payload: {
           ...options.extraPayload,
           cancelledOrders: cancelledOrders.length,
-          positionsFound: positions.length,
+          positionsFound: positionIdsFound.size,
           closeOrders,
           errors,
         },
@@ -1413,10 +1536,10 @@ async function executeProprAccountEmergencyStop(
     reason: options.reason,
     stoppedBotIds,
     cancelledOrders: cancelledOrders.length,
-    positionsFound: positions.length,
+    positionsFound: positionIdsFound.size,
     closeOrders,
     errors,
-    checkedAt: now,
+    checkedAt: completedAt,
   };
 }
 
@@ -1966,6 +2089,19 @@ function hasGridLevelIndex(order: PersistedOrder): boolean {
   return gridLevelIndex(order) !== null;
 }
 
+function detectNativeProtectiveFill(
+  orders: PersistedOrder[],
+  trades: Awaited<ReturnType<ProprExecutionAdapter["getTrades"]>>,
+): BotExitTrigger | null {
+  for (const order of orders) {
+    if (!isProtectiveOrderType(order.type)) continue;
+    const providerId = order.provider_order_id ?? order.id;
+    if (!trades.some((trade) => trade.orderId === providerId)) continue;
+    return order.type.startsWith("stop_") ? "stop_loss" : "take_profit";
+  }
+  return null;
+}
+
 function gridLevelIndex(order: PersistedOrder): number | null {
   const rawIndex = order.grid_level_id?.split("-")[1];
   if (!rawIndex) return null;
@@ -1997,6 +2133,110 @@ async function closeInitialInventory(adapter: ProprExecutionAdapter, bot: Bot, q
     reduceOnly: true,
     closePosition: true,
   });
+}
+
+async function placeNativeProtectiveOrders(
+  adapter: ProprExecutionAdapter,
+  bot: Bot,
+  onPlaced: (order: ExecutionOrder) => void,
+): Promise<ExecutionOrder[]> {
+  const configuredOrders = configuredNativeProtections(bot);
+  if (configuredOrders.length === 0) return [];
+
+  const position = await waitForProprPosition(adapter, bot);
+  if (!position?.providerPositionId) {
+    throw new Error("Propr position was not available for native stop-loss/take-profit attachment.");
+  }
+
+  const orders: ExecutionOrder[] = [];
+  for (const protection of configuredOrders) {
+    const order = await placeNativeProtectiveOrder(adapter, bot, position, protection);
+    orders.push(order);
+    onPlaced(order);
+  }
+  return orders;
+}
+
+function configuredNativeProtections(
+  bot: Bot,
+): Array<{ type: OrderType; triggerPrice: string; suffix: string }> {
+  const protections: Array<{ type: OrderType; triggerPrice: string; suffix: string }> = [];
+  if (bot.config.stopLoss && isPositiveDecimal(bot.config.stopLoss)) {
+    protections.push({ type: "stop_market", triggerPrice: bot.config.stopLoss, suffix: "stop-loss" });
+  }
+  if (bot.config.takeProfit && isPositiveDecimal(bot.config.takeProfit)) {
+    protections.push({ type: "take_profit_market", triggerPrice: bot.config.takeProfit, suffix: "take-profit" });
+  }
+  return protections;
+}
+
+async function ensureNativeProtectiveOrders(
+  bot: Bot,
+  adapter: ProprExecutionAdapter,
+  position: ExecutionPosition,
+  openProviderIds: Set<string>,
+): Promise<number> {
+  let placed = 0;
+  const knownOrders = listOrders(bot.id);
+
+  for (const protection of configuredNativeProtections(bot)) {
+    const alreadyOpen = knownOrders.some(
+      (order) =>
+        order.type === protection.type &&
+        openProviderIds.has(order.provider_order_id ?? order.id),
+    );
+    if (alreadyOpen) continue;
+
+    const order = await placeNativeProtectiveOrder(adapter, bot, position, protection);
+    insertOrder(order);
+    openProviderIds.add(order.providerOrderId ?? order.id);
+    placed += 1;
+  }
+
+  return placed;
+}
+
+async function placeNativeProtectiveOrder(
+  adapter: ProprExecutionAdapter,
+  bot: Bot,
+  position: ExecutionPosition,
+  protection: { type: OrderType; triggerPrice: string; suffix: string },
+): Promise<ExecutionOrder> {
+  if (!position.providerPositionId) throw new Error("Propr position id is required for a native protective order.");
+  return adapter.placeOrder({
+    clientOrderId: ulid(),
+    botId: bot.id,
+    gridLevelId: `${bot.config.pair}-protective-${protection.suffix}`,
+    asset: bot.config.pair,
+    side: bot.config.positionSide === "long" ? "sell" : "buy",
+    positionSide: bot.config.positionSide,
+    type: protection.type,
+    quantity: position.quantity,
+    triggerPrice: protection.triggerPrice,
+    positionId: position.providerPositionId,
+    timeInForce: "GTC",
+    reduceOnly: true,
+    closePosition: true,
+  });
+}
+
+async function waitForProprPosition(adapter: ProprExecutionAdapter, bot: Bot): Promise<ExecutionPosition | null> {
+  for (let pass = 0; pass < PROPR_POSITION_READY_PASSES; pass += 1) {
+    const positions = await adapter.getPositions(bot.config.pair);
+    const position = positions.find(
+      (candidate) =>
+        candidate.asset === bot.config.pair &&
+        candidate.positionSide === bot.config.positionSide &&
+        decimal(candidate.quantity).gt(0),
+    );
+    if (position) return position;
+    await delay(PROPR_SHUTDOWN_SETTLE_MS);
+  }
+  return null;
+}
+
+function isProtectiveOrderType(type: OrderType): boolean {
+  return ["stop_market", "stop_limit", "take_profit_market", "take_profit_limit"].includes(type);
 }
 
 function estimateBotInventoryQuantity(bot: Bot) {
