@@ -35,13 +35,13 @@ describe("Propr order mapping", () => {
     );
   });
 
-  it("keeps conditional protections attached to the protected position side", () => {
+  it("aligns conditional protections with Propr live side validation", () => {
     expect(
       proprPositionSideForIntent({ ...baseIntent, type: "stop_market", side: "sell", positionSide: "long", reduceOnly: true }),
-    ).toBe("long");
+    ).toBe("short");
     expect(
       proprPositionSideForIntent({ ...baseIntent, type: "take_profit_market", side: "buy", positionSide: "short", reduceOnly: true }),
-    ).toBe("short");
+    ).toBe("long");
   });
 
   it("deduplicates concurrent account setup requests", async () => {
@@ -86,7 +86,7 @@ describe("Propr order mapping", () => {
     expect(body.orders[0]).toMatchObject({
       type: "stop_market",
       side: "sell",
-      positionSide: "long",
+      positionSide: "short",
       triggerPrice: "62000",
       positionId: "position-1",
       reduceOnly: true,

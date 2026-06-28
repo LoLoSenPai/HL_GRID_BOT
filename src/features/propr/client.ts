@@ -379,11 +379,6 @@ export function accountIdMatches(accountId: string | undefined, selectedAccountI
 }
 
 export function proprPositionSideForIntent(intent: OrderIntent): string {
-  if (isConditionalOrderType(intent.type)) return intent.positionSide;
   if (intent.reduceOnly) return intent.side === "buy" ? "long" : "short";
   return intent.positionSide;
-}
-
-function isConditionalOrderType(type: OrderIntent["type"]): boolean {
-  return ["stop_market", "stop_limit", "take_profit_market", "take_profit_limit"].includes(type);
 }
