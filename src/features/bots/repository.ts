@@ -2194,10 +2194,11 @@ async function ensureNativeProtectiveOrders(
   let placed = 0;
   let cancelledDuplicates = 0;
   const knownOrders = listOrders(bot.id);
+  const knownOrdersByProviderId = new Map(knownOrders.map((order) => [order.provider_order_id ?? order.id, order] as const));
 
   for (const protection of configuredNativeProtections(bot)) {
     const matchingProviderOrders = openProviderOrders.filter((order) =>
-      nativeProtectionMatches(bot, protection, order),
+      nativeProtectionMatches(bot, protection, order, knownOrdersByProviderId.get(order.providerOrderId ?? order.id)),
     );
     const keepProviderOrder = matchingProviderOrders.sort(compareNewestFirst)[0];
     const duplicates = matchingProviderOrders.slice(1);
@@ -2209,11 +2210,14 @@ async function ensureNativeProtectiveOrders(
     }
 
     if (keepProviderOrder) {
+      const keepProviderOrderId = keepProviderOrder.providerOrderId ?? keepProviderOrder.id;
+      const knownKeepOrder = knownOrdersByProviderId.get(keepProviderOrderId);
       insertOrder({
         ...keepProviderOrder,
         botId: bot.id,
         gridLevelId: `${bot.config.pair}-protective-${protection.suffix}`,
         positionSide: bot.config.positionSide,
+        triggerPrice: keepProviderOrder.triggerPrice ?? knownKeepOrder?.trigger_price ?? protection.triggerPrice,
       });
       continue;
     }
@@ -2224,7 +2228,7 @@ async function ensureNativeProtectiveOrders(
         order.type === protection.type &&
         order.asset === bot.config.pair &&
         order.side === protectiveOrderSide(bot) &&
-        sameDecimal(order.trigger_price, protection.triggerPrice) &&
+        (!order.trigger_price || sameDecimal(order.trigger_price, protection.triggerPrice)) &&
         openProviderIds.has(providerOrderId)
       );
     });
@@ -2290,15 +2294,21 @@ function nativeProtectionMatches(
   bot: Bot,
   protection: { type: OrderType; triggerPrice: string },
   order: ExecutionOrder,
+  knownOrder?: PersistedOrder,
 ): boolean {
-  return (
+  const isSameOpenProtection =
     order.asset === bot.config.pair &&
     order.type === protection.type &&
     order.side === protectiveOrderSide(bot) &&
     order.reduceOnly &&
-    sameDecimal(order.triggerPrice, protection.triggerPrice) &&
-    ["pending", "open", "partially_filled"].includes(order.status)
-  );
+    ["pending", "open", "partially_filled"].includes(order.status);
+
+  if (!isSameOpenProtection) {
+    return false;
+  }
+
+  const triggerPrice = order.triggerPrice ?? knownOrder?.trigger_price;
+  return !triggerPrice || sameDecimal(triggerPrice, protection.triggerPrice);
 }
 
 function compareNewestFirst(left: ExecutionOrder, right: ExecutionOrder): number {

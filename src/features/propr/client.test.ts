@@ -94,7 +94,7 @@ describe("Propr order mapping", () => {
     });
   });
 
-  it("keeps the bot-side positionSide in local execution orders", async () => {
+  it("keeps intent-owned fields in local execution orders when Propr response is partial", async () => {
     const client = {
       accountId: "account-1",
       setup: vi.fn(),
@@ -107,13 +107,15 @@ describe("Propr order mapping", () => {
           base: "BTC",
           side: "sell",
           positionSide: "short",
-          type: "limit",
+          type: "stop_market",
           quantity: "0.001",
-          price: "65000",
+          price: null,
+          triggerPrice: null,
           status: "open",
           cumulativeQuantity: "0",
           averageFillPrice: null,
           reduceOnly: true,
+          closePosition: null,
           createdAt: "2026-06-28T00:00:00.000Z",
           updatedAt: "2026-06-28T00:00:00.000Z",
         },
@@ -126,10 +128,15 @@ describe("Propr order mapping", () => {
       clientOrderId: "intent-1",
       side: "sell",
       positionSide: "long",
+      type: "stop_market",
+      triggerPrice: "62000",
       reduceOnly: true,
+      closePosition: true,
     });
 
     expect(order.positionSide).toBe("long");
+    expect(order.triggerPrice).toBe("62000");
+    expect(order.closePosition).toBe(true);
   });
 });
 

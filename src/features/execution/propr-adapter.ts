@@ -64,11 +64,15 @@ export class ProprExecutionAdapter implements ExecutionAdapter {
     await this.assertReady();
     const [order] = await this.client.createOrder(intent);
     if (!order) throw new Error("Propr did not return an order.");
+    const mappedOrder = mapOrder(order);
     return {
-      ...mapOrder(order),
+      ...mappedOrder,
       botId: intent.botId,
       gridLevelId: intent.gridLevelId,
       positionSide: intent.positionSide,
+      price: mappedOrder.price ?? intent.price,
+      triggerPrice: mappedOrder.triggerPrice ?? intent.triggerPrice,
+      closePosition: mappedOrder.closePosition ?? intent.closePosition,
     };
   }
 
