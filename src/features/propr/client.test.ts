@@ -138,6 +138,59 @@ describe("Propr order mapping", () => {
     expect(order.triggerPrice).toBe("62000");
     expect(order.closePosition).toBe(true);
   });
+
+  it("lists open-like Propr orders without relying on the open status filter", async () => {
+    const pendingProtection = {
+      orderId: "order-1",
+      intentId: "intent-1",
+      base: "BTC",
+      side: "sell",
+      positionSide: "short",
+      type: "take_profit_market",
+      quantity: "0.001",
+      price: null,
+      triggerPrice: "65000",
+      status: "pending",
+      cumulativeQuantity: "0",
+      averageFillPrice: null,
+      reduceOnly: true,
+      closePosition: true,
+      createdAt: "2026-06-28T00:00:00.000Z",
+      updatedAt: "2026-06-28T00:00:00.000Z",
+    };
+    const openGridOrder = {
+      orderId: "order-2",
+      intentId: "intent-2",
+      base: "BTC",
+      side: "buy",
+      positionSide: "long",
+      type: "limit",
+      quantity: "0.001",
+      price: "63000",
+      triggerPrice: null,
+      status: "open",
+      cumulativeQuantity: "0",
+      averageFillPrice: null,
+      reduceOnly: false,
+      closePosition: false,
+      createdAt: "2026-06-28T00:00:00.000Z",
+      updatedAt: "2026-06-28T00:00:00.000Z",
+    };
+    const client = {
+      accountId: "account-1",
+      setup: vi.fn(),
+      getOrders: vi.fn()
+        .mockResolvedValueOnce([openGridOrder])
+        .mockResolvedValueOnce([pendingProtection, { ...openGridOrder, status: "filled" }]),
+    } as unknown as ProprClient;
+
+    const adapter = new ProprExecutionAdapter(client);
+    const orders = await adapter.getOpenOrders("BTC");
+
+    expect(client.getOrders).toHaveBeenNthCalledWith(1, { base: "BTC", limit: 100, offset: 0, status: "open" });
+    expect(client.getOrders).toHaveBeenNthCalledWith(2, { base: "BTC", limit: 100, offset: 0 });
+    expect(orders.map((order) => order.type)).toEqual(["limit", "take_profit_market"]);
+  });
 });
 
 describe("Propr account selection", () => {

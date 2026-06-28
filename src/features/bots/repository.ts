@@ -1272,6 +1272,7 @@ function markStaleLocalOpenOrdersCancelled(
 ): number {
   let staleOpenOrders = 0;
   for (const order of orders.filter((item) => ["pending", "open", "partially_filled"].includes(item.status))) {
+    if (isProtectiveOrderType(order.type)) continue;
     const providerOrderId = order.provider_order_id ?? order.id;
     if (openProviderIds.has(providerOrderId)) continue;
     if (trades.some((trade) => trade.orderId === providerOrderId)) continue;
@@ -2197,10 +2198,14 @@ async function ensureNativeProtectiveOrders(
   const knownOrdersByProviderId = new Map(knownOrders.map((order) => [order.provider_order_id ?? order.id, order] as const));
 
   for (const protection of configuredNativeProtections(bot)) {
+    const matchingLocalOrders = knownOrders
+      .filter((order) => localProtectionMatches(bot, protection, order))
+      .sort(comparePersistedNewestFirst);
     const matchingProviderOrders = openProviderOrders.filter((order) =>
       nativeProtectionMatches(bot, protection, order, knownOrdersByProviderId.get(order.providerOrderId ?? order.id)),
     );
     const keepProviderOrder = matchingProviderOrders.sort(compareNewestFirst)[0];
+    const keepLocalOrder = matchingLocalOrders[0];
     const duplicates = matchingProviderOrders.slice(1);
     for (const duplicate of duplicates) {
       const duplicateProviderOrderId = duplicate.providerOrderId ?? duplicate.id;
@@ -2212,6 +2217,11 @@ async function ensureNativeProtectiveOrders(
     if (keepProviderOrder) {
       const keepProviderOrderId = keepProviderOrder.providerOrderId ?? keepProviderOrder.id;
       const knownKeepOrder = knownOrdersByProviderId.get(keepProviderOrderId);
+      cancelledDuplicates += await cancelDuplicateProtectiveLocals(
+        bot.id,
+        matchingLocalOrders.filter((order) => (order.provider_order_id ?? order.id) !== keepProviderOrderId),
+        adapter,
+      );
       insertOrder({
         ...keepProviderOrder,
         botId: bot.id,
@@ -2222,17 +2232,14 @@ async function ensureNativeProtectiveOrders(
       continue;
     }
 
-    const alreadyOpen = knownOrders.some((order) => {
-      const providerOrderId = order.provider_order_id ?? order.id;
-      return (
-        order.type === protection.type &&
-        order.asset === bot.config.pair &&
-        order.side === protectiveOrderSide(bot) &&
-        (!order.trigger_price || sameDecimal(order.trigger_price, protection.triggerPrice)) &&
-        openProviderIds.has(providerOrderId)
+    if (keepLocalOrder) {
+      cancelledDuplicates += await cancelDuplicateProtectiveLocals(
+        bot.id,
+        matchingLocalOrders.slice(1),
+        adapter,
       );
-    });
-    if (alreadyOpen) continue;
+      continue;
+    }
 
     const order = await placeNativeProtectiveOrder(adapter, bot, position, protection);
     insertOrder(order);
@@ -2311,8 +2318,45 @@ function nativeProtectionMatches(
   return !triggerPrice || sameDecimal(triggerPrice, protection.triggerPrice);
 }
 
+function localProtectionMatches(
+  bot: Bot,
+  protection: { type: OrderType; triggerPrice: string },
+  order: PersistedOrder,
+): boolean {
+  return (
+    order.asset === bot.config.pair &&
+    order.type === protection.type &&
+    order.side === protectiveOrderSide(bot) &&
+    Boolean(order.reduce_only) &&
+    ["pending", "open", "partially_filled"].includes(order.status) &&
+    (!order.trigger_price || sameDecimal(order.trigger_price, protection.triggerPrice))
+  );
+}
+
+async function cancelDuplicateProtectiveLocals(
+  botId: string,
+  duplicates: PersistedOrder[],
+  adapter: ProprExecutionAdapter,
+): Promise<number> {
+  let cancelled = 0;
+  const now = new Date().toISOString();
+  for (const duplicate of duplicates) {
+    const providerOrderId = duplicate.provider_order_id ?? duplicate.id;
+    await adapter.cancelOrder(providerOrderId).catch(() => null);
+    getSqlite()
+      .prepare("UPDATE orders SET status = 'cancelled', updated_at = ? WHERE bot_id = ? AND id = ?")
+      .run(now, botId, duplicate.id);
+    cancelled += 1;
+  }
+  return cancelled;
+}
+
 function compareNewestFirst(left: ExecutionOrder, right: ExecutionOrder): number {
   return Date.parse(right.createdAt) - Date.parse(left.createdAt);
+}
+
+function comparePersistedNewestFirst(left: PersistedOrder, right: PersistedOrder): number {
+  return Date.parse(right.created_at) - Date.parse(left.created_at);
 }
 
 function sameDecimal(left: string | null | undefined, right: string | null | undefined): boolean {

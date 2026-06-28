@@ -21,7 +21,7 @@ function mapOrder(order: Awaited<ReturnType<ProprClient["getOrders"]>>[number]):
     quantity: order.quantity,
     price: order.price ?? undefined,
     triggerPrice: order.triggerPrice ?? undefined,
-    status: order.status as ExecutionOrder["status"],
+    status: normalizeOrderStatus(order.status),
     cumulativeQuantity: order.cumulativeQuantity,
     averageFillPrice: order.averageFillPrice ?? undefined,
     reduceOnly: order.reduceOnly,
@@ -29,6 +29,26 @@ function mapOrder(order: Awaited<ReturnType<ProprClient["getOrders"]>>[number]):
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
   };
+}
+
+function normalizeOrderStatus(status: string): ExecutionOrder["status"] {
+  const normalized = status.toLowerCase().replaceAll("-", "_");
+  if (normalized === "canceled" || normalized === "expired" || normalized === "closed") return "cancelled";
+  if (
+    normalized === "pending" ||
+    normalized === "open" ||
+    normalized === "partially_filled" ||
+    normalized === "filled" ||
+    normalized === "cancelled" ||
+    normalized === "rejected"
+  ) {
+    return normalized;
+  }
+  return "open";
+}
+
+function isOpenLikeOrder(order: ExecutionOrder): boolean {
+  return ["pending", "open", "partially_filled"].includes(order.status);
 }
 
 export class ProprExecutionAdapter implements ExecutionAdapter {
@@ -72,7 +92,7 @@ export class ProprExecutionAdapter implements ExecutionAdapter {
       positionSide: intent.positionSide,
       price: mappedOrder.price ?? intent.price,
       triggerPrice: mappedOrder.triggerPrice ?? intent.triggerPrice,
-      closePosition: mappedOrder.closePosition ?? intent.closePosition,
+      closePosition: intent.closePosition ?? mappedOrder.closePosition,
     };
   }
 
@@ -95,11 +115,20 @@ export class ProprExecutionAdapter implements ExecutionAdapter {
 
   async getOpenOrders(asset?: MarketSymbol): Promise<ExecutionOrder[]> {
     await this.assertReady();
-    const orders = await this.client.getOrders({
-      status: "open",
+    const params = {
       ...(asset ? { base: asset } : {}),
-    });
-    return orders.map(mapOrder);
+      limit: 100,
+      offset: 0,
+    };
+    const [openOrders, recentOrders] = await Promise.all([
+      this.client.getOrders({ ...params, status: "open" }),
+      this.client.getOrders(params),
+    ]);
+    const ordersById = new Map(openOrders.map((order) => [order.orderId, order]));
+    for (const order of recentOrders) {
+      if (!ordersById.has(order.orderId)) ordersById.set(order.orderId, order);
+    }
+    return [...ordersById.values()].map(mapOrder).filter(isOpenLikeOrder);
   }
 
   async getPositions(asset?: MarketSymbol): Promise<ExecutionPosition[]> {
