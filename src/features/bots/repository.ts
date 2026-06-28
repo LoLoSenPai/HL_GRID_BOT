@@ -96,6 +96,7 @@ export interface PersistedOrder {
   status: "pending" | "open" | "partially_filled" | "filled" | "cancelled" | "rejected";
   quantity: string;
   price: string | null;
+  trigger_price: string | null;
   reduce_only: 0 | 1;
   cumulative_quantity: string;
   average_fill_price: string | null;
@@ -1162,14 +1163,18 @@ export async function reconcileProprBot(id: string, ownerUser?: string): Promise
   }
 
   let repairedProtectiveOrders = 0;
+  let cancelledDuplicateProtectiveOrders = 0;
   if (matchingPosition) {
     try {
-      repairedProtectiveOrders = await ensureNativeProtectiveOrders(
+      const protectionResult = await ensureNativeProtectiveOrders(
         bot,
         adapter,
         matchingPosition,
+        openProviderOrders,
         openProviderIds,
       );
+      repairedProtectiveOrders = protectionResult.placed;
+      cancelledDuplicateProtectiveOrders = protectionResult.cancelledDuplicates;
     } catch (error) {
       const message = `Native Propr protection could not be guaranteed: ${errorMessage(error)}`;
       addEvent({
@@ -1192,6 +1197,7 @@ export async function reconcileProprBot(id: string, ownerUser?: string): Promise
     insertedFills > 0 ||
     placedGridOrders > 0 ||
     repairedProtectiveOrders > 0 ||
+    cancelledDuplicateProtectiveOrders > 0 ||
     staleOpenOrders > 0 ||
     shouldEmitIdleProprSync(bot.id)
   ) {
@@ -1199,8 +1205,15 @@ export async function reconcileProprBot(id: string, ownerUser?: string): Promise
       botId: bot.id,
       type: "bot.propr_reconciled",
       severity: "success",
-      message: `Propr sync complete: ${syncedOrders} filled orders, ${insertedFills} new fills, ${placedGridOrders} grid orders, ${repairedProtectiveOrders} protections, ${staleOpenOrders} stale locals.`,
-      payload: { syncedOrders, insertedFills, placedGridOrders, repairedProtectiveOrders, staleOpenOrders },
+      message: `Propr sync complete: ${syncedOrders} filled orders, ${insertedFills} new fills, ${placedGridOrders} grid orders, ${repairedProtectiveOrders} protections, ${cancelledDuplicateProtectiveOrders} duplicate protections cancelled, ${staleOpenOrders} stale locals.`,
+      payload: {
+        syncedOrders,
+        insertedFills,
+        placedGridOrders,
+        repairedProtectiveOrders,
+        cancelledDuplicateProtectiveOrders,
+        staleOpenOrders,
+      },
     });
   }
 
@@ -1902,9 +1915,9 @@ function insertOrder(order: ExecutionOrder) {
       `
       INSERT OR IGNORE INTO orders (
         id, bot_id, grid_level_id, provider_order_id, intent_id, asset, side, position_side,
-        type, status, quantity, price, reduce_only, cumulative_quantity, average_fill_price,
+        type, status, quantity, price, trigger_price, reduce_only, cumulative_quantity, average_fill_price,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
     )
     .run(
@@ -1920,6 +1933,7 @@ function insertOrder(order: ExecutionOrder) {
       order.status,
       order.quantity,
       order.price ?? null,
+      order.triggerPrice ?? null,
       order.reduceOnly ? 1 : 0,
       order.cumulativeQuantity,
       order.averageFillPrice ?? null,
@@ -2174,17 +2188,46 @@ async function ensureNativeProtectiveOrders(
   bot: Bot,
   adapter: ProprExecutionAdapter,
   position: ExecutionPosition,
+  openProviderOrders: ExecutionOrder[],
   openProviderIds: Set<string>,
-): Promise<number> {
+): Promise<{ placed: number; cancelledDuplicates: number }> {
   let placed = 0;
+  let cancelledDuplicates = 0;
   const knownOrders = listOrders(bot.id);
 
   for (const protection of configuredNativeProtections(bot)) {
-    const alreadyOpen = knownOrders.some(
-      (order) =>
-        order.type === protection.type &&
-        openProviderIds.has(order.provider_order_id ?? order.id),
+    const matchingProviderOrders = openProviderOrders.filter((order) =>
+      nativeProtectionMatches(bot, protection, order),
     );
+    const keepProviderOrder = matchingProviderOrders.sort(compareNewestFirst)[0];
+    const duplicates = matchingProviderOrders.slice(1);
+    for (const duplicate of duplicates) {
+      const duplicateProviderOrderId = duplicate.providerOrderId ?? duplicate.id;
+      const cancelled = await adapter.cancelOrder(duplicateProviderOrderId).catch(() => null);
+      openProviderIds.delete(duplicateProviderOrderId);
+      if (cancelled) cancelledDuplicates += 1;
+    }
+
+    if (keepProviderOrder) {
+      insertOrder({
+        ...keepProviderOrder,
+        botId: bot.id,
+        gridLevelId: `${bot.config.pair}-protective-${protection.suffix}`,
+        positionSide: bot.config.positionSide,
+      });
+      continue;
+    }
+
+    const alreadyOpen = knownOrders.some((order) => {
+      const providerOrderId = order.provider_order_id ?? order.id;
+      return (
+        order.type === protection.type &&
+        order.asset === bot.config.pair &&
+        order.side === protectiveOrderSide(bot) &&
+        sameDecimal(order.trigger_price, protection.triggerPrice) &&
+        openProviderIds.has(providerOrderId)
+      );
+    });
     if (alreadyOpen) continue;
 
     const order = await placeNativeProtectiveOrder(adapter, bot, position, protection);
@@ -2193,7 +2236,7 @@ async function ensureNativeProtectiveOrders(
     placed += 1;
   }
 
-  return placed;
+  return { placed, cancelledDuplicates };
 }
 
 async function placeNativeProtectiveOrder(
@@ -2208,7 +2251,7 @@ async function placeNativeProtectiveOrder(
     botId: bot.id,
     gridLevelId: `${bot.config.pair}-protective-${protection.suffix}`,
     asset: bot.config.pair,
-    side: bot.config.positionSide === "long" ? "sell" : "buy",
+    side: protectiveOrderSide(bot),
     positionSide: bot.config.positionSide,
     type: protection.type,
     quantity: position.quantity,
@@ -2237,6 +2280,34 @@ async function waitForProprPosition(adapter: ProprExecutionAdapter, bot: Bot): P
 
 function isProtectiveOrderType(type: OrderType): boolean {
   return ["stop_market", "stop_limit", "take_profit_market", "take_profit_limit"].includes(type);
+}
+
+function protectiveOrderSide(bot: Bot): OrderSide {
+  return bot.config.positionSide === "long" ? "sell" : "buy";
+}
+
+function nativeProtectionMatches(
+  bot: Bot,
+  protection: { type: OrderType; triggerPrice: string },
+  order: ExecutionOrder,
+): boolean {
+  return (
+    order.asset === bot.config.pair &&
+    order.type === protection.type &&
+    order.side === protectiveOrderSide(bot) &&
+    order.reduceOnly &&
+    sameDecimal(order.triggerPrice, protection.triggerPrice) &&
+    ["pending", "open", "partially_filled"].includes(order.status)
+  );
+}
+
+function compareNewestFirst(left: ExecutionOrder, right: ExecutionOrder): number {
+  return Date.parse(right.createdAt) - Date.parse(left.createdAt);
+}
+
+function sameDecimal(left: string | null | undefined, right: string | null | undefined): boolean {
+  if (!left || !right) return false;
+  return decimal(left).eq(right);
 }
 
 function estimateBotInventoryQuantity(bot: Bot) {
@@ -2274,6 +2345,7 @@ async function syncTradesForPersistedOrders(bot: Bot, adapter: ProprExecutionAda
     type: order.type,
     quantity: order.quantity,
     price: order.price ?? undefined,
+    triggerPrice: order.trigger_price ?? undefined,
     status: order.status,
     cumulativeQuantity: order.cumulative_quantity,
     averageFillPrice: order.average_fill_price ?? undefined,

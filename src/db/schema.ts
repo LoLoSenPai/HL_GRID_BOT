@@ -64,6 +64,7 @@ export const orders = sqliteTable(
     status: text("status").notNull(),
     quantity: text("quantity").notNull(),
     price: text("price"),
+    triggerPrice: text("trigger_price"),
     reduceOnly: integer("reduce_only", { mode: "boolean" }).notNull().default(false),
     cumulativeQuantity: text("cumulative_quantity").notNull().default("0"),
     averageFillPrice: text("average_fill_price"),

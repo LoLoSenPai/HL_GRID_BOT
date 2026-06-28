@@ -358,6 +358,7 @@ export class ProprClient {
         } catch {
           // Keep status text when the response is not JSON.
         }
+        logFailedProprRequest({ method, path, statusCode: response.status, code, message, body: options.body });
         throw new ProprAPIError(response.status, code, message);
       }
 
@@ -381,4 +382,27 @@ export function accountIdMatches(accountId: string | undefined, selectedAccountI
 export function proprPositionSideForIntent(intent: OrderIntent): string {
   if (intent.reduceOnly) return intent.side === "buy" ? "long" : "short";
   return intent.positionSide;
+}
+
+function logFailedProprRequest(input: {
+  method: string;
+  path: string;
+  statusCode: number;
+  code: number | null;
+  message: string;
+  body: unknown;
+}) {
+  if (process.env.PROPR_DEBUG_ORDER_PAYLOADS !== "true") return;
+  if (!input.path.includes("/orders")) return;
+  console.error(
+    "[propr:order-rejected]",
+    JSON.stringify({
+      method: input.method,
+      path: input.path,
+      statusCode: input.statusCode,
+      code: input.code,
+      message: input.message,
+      body: input.body,
+    }),
+  );
 }

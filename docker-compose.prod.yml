@@ -10,6 +10,7 @@ services:
       NODE_ENV: production
       NEXT_TELEMETRY_DISABLED: "1"
       DATABASE_URL: file:/app/data/hl_grid_bot.sqlite
+      PROPR_DEBUG_ORDER_PAYLOADS: "${PROPR_DEBUG_ORDER_PAYLOADS:-false}"
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-3000}:3000"
     volumes:
@@ -41,6 +42,7 @@ services:
       DATABASE_URL: file:/app/data/hl_grid_bot.sqlite
       PROPR_WORKER_INTERVAL_MS: "${PROPR_WORKER_INTERVAL_MS:-2000}"
       PROPR_SAFETY_INTERVAL_MS: "${PROPR_SAFETY_INTERVAL_MS:-1000}"
+      PROPR_DEBUG_ORDER_PAYLOADS: "${PROPR_DEBUG_ORDER_PAYLOADS:-false}"
     volumes:
       - ./data:/app/data
     command: ["npm", "run", "worker:propr"]

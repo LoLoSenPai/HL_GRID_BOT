@@ -97,6 +97,7 @@ function order(
     status: "filled",
     quantity: "1",
     price,
+    trigger_price: null,
     reduce_only: reduceOnly ? 1 : 0,
     cumulative_quantity: "1",
     average_fill_price: price,

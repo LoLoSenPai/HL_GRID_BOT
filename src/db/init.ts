@@ -62,6 +62,7 @@ export function ensureDatabase() {
       status TEXT NOT NULL,
       quantity TEXT NOT NULL,
       price TEXT,
+      trigger_price TEXT,
       reduce_only INTEGER NOT NULL DEFAULT 0,
       cumulative_quantity TEXT NOT NULL DEFAULT '0',
       average_fill_price TEXT,
@@ -140,6 +141,7 @@ export function ensureDatabase() {
 
   ensureColumn("bot_configs", "position_side", "TEXT NOT NULL DEFAULT 'long'");
   ensureColumn("bot_configs", "challenge_daily_loss_stop_pct", "TEXT NOT NULL DEFAULT '2.75'");
+  ensureColumn("orders", "trigger_price", "TEXT");
   ensureColumn("bots", "owner_user", `TEXT NOT NULL DEFAULT ${quoteSqlString(getDefaultBotOwnerUser())}`);
   getSqlite().exec("CREATE INDEX IF NOT EXISTS bots_owner_status_idx ON bots(owner_user, status)");
 

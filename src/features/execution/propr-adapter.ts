@@ -20,10 +20,12 @@ function mapOrder(order: Awaited<ReturnType<ProprClient["getOrders"]>>[number]):
     type: order.type as ExecutionOrder["type"],
     quantity: order.quantity,
     price: order.price ?? undefined,
+    triggerPrice: order.triggerPrice ?? undefined,
     status: order.status as ExecutionOrder["status"],
     cumulativeQuantity: order.cumulativeQuantity,
     averageFillPrice: order.averageFillPrice ?? undefined,
     reduceOnly: order.reduceOnly,
+    closePosition: order.closePosition,
     createdAt: order.createdAt,
     updatedAt: order.updatedAt,
   };

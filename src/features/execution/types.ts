@@ -43,10 +43,12 @@ export interface ExecutionOrder {
   type: OrderType;
   quantity: DecimalString;
   price?: DecimalString;
+  triggerPrice?: DecimalString;
   status: "pending" | "open" | "partially_filled" | "filled" | "cancelled" | "rejected";
   cumulativeQuantity: DecimalString;
   averageFillPrice?: DecimalString;
   reduceOnly: boolean;
+  closePosition?: boolean;
   createdAt: string;
   updatedAt: string;
 }
