@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { formatMarketSymbol } from "@/domain/markets";
 import type { GridConfig } from "@/domain/types";
-import { createAndStartPaperBot, createAndStartProprBot, createLiveCandidate, listBots } from "@/features/bots/repository";
+import { createAndQueueProprBot, createAndStartPaperBot, createLiveCandidate, listBots } from "@/features/bots/repository";
 import { getCurrentUser } from "@/lib/auth/current-user";
 
 export async function GET() {
@@ -24,10 +24,10 @@ export async function POST(request: Request) {
     const bot =
       body.config.mode === "propr_live"
         ? body.confirmProprChallengeStart
-          ? await createAndStartProprBot(body.name ?? `${formatMarketSymbol(body.config.pair)} Challenge Grid`, body.config, user)
+          ? await createAndQueueProprBot(body.name ?? `${formatMarketSymbol(body.config.pair)} Challenge Grid`, body.config, user)
           : createLiveCandidate(body.name ?? `${formatMarketSymbol(body.config.pair)} Challenge Candidate`, body.config, undefined, user)
         : await createAndStartPaperBot(body.name ?? `${formatMarketSymbol(body.config.pair)} Local Sim Grid`, body.config, user);
-    return NextResponse.json({ data: bot }, { status: 201 });
+    return NextResponse.json({ data: bot }, { status: body.config.mode === "propr_live" && body.confirmProprChallengeStart ? 202 : 201 });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Failed to create bot" },

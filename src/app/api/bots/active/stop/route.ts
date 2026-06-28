@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { getBot, listBots, stopBot } from "@/features/bots/repository";
+import { getBot, listBots, requestStopBot, stopBot } from "@/features/bots/repository";
 import { getCurrentUser } from "@/lib/auth/current-user";
 
 export async function POST(request: Request) {
@@ -12,6 +12,11 @@ export async function POST(request: Request) {
     ? getBot(requestedId, user)
     : listBots(user).find((bot) => ["paper", "running", "live", "out_of_range"].includes(bot.status));
   if (!active) return NextResponse.json({ error: "No active bot to stop" }, { status: 404 });
+
+  if (active.config.mode === "propr_live") {
+    const bot = requestStopBot(active.id, user);
+    return NextResponse.json({ ok: true, id: active.id, data: bot }, { status: 202 });
+  }
 
   await stopBot(active.id, user);
   return NextResponse.json({ ok: true, id: active.id });

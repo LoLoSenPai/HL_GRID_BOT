@@ -728,9 +728,25 @@ export function GridConfigPanel({
     patch({ gridCount: challengePreflight.recommendedGridOrders });
   };
 
-  const submitBotConfig = () => {
+  const runPanelAction = (action: () => Promise<void>, fallbackError: string) => {
     setActionError(null);
-    startTransition(async () => {
+    startTransition(() => {
+      void action().catch((error) => {
+        setActionError(error instanceof Error ? error.message : fallbackError);
+      });
+    });
+  };
+
+  const readActionPayload = async (response: Response, fallbackError: string): Promise<{ error?: string }> => {
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    if (!response.ok) {
+      throw new Error(payload.error ?? fallbackError);
+    }
+    return payload;
+  };
+
+  const submitBotConfig = () => {
+    runPanelAction(async () => {
       const response = await fetch("/api/bots", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -740,13 +756,9 @@ export function GridConfigPanel({
           confirmProprChallengeStart: liveModeAcknowledged,
         }),
       });
-      const payload = (await response.json()) as { error?: string };
-      if (!response.ok) {
-        setActionError(payload.error ?? "Unable to save bot.");
-        return;
-      }
+      await readActionPayload(response, "Unable to save bot.");
       router.refresh();
-    });
+    }, "Unable to save bot.");
   };
 
   const confirmDeployFromPreview = () => {
@@ -756,20 +768,15 @@ export function GridConfigPanel({
 
   const stopActiveBot = () => {
     if (!activeBot) return;
-    setActionError(null);
-    startTransition(async () => {
+    runPanelAction(async () => {
       const response = await fetch("/api/bots/active/stop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: activeBot.id }),
       });
-      const payload = (await response.json()) as { error?: string };
-      if (!response.ok) {
-        setActionError(payload.error ?? "Unable to stop bot.");
-        return;
-      }
+      await readActionPayload(response, "Unable to stop bot.");
       router.refresh();
-    });
+    }, "Unable to stop bot.");
   };
 
   const closeActiveBot = () => {
@@ -779,26 +786,20 @@ export function GridConfigPanel({
     );
     if (!confirmed) return;
 
-    setActionError(null);
-    startTransition(async () => {
+    runPanelAction(async () => {
       const response = await fetch("/api/bots/active/close", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id: activeBot.id }),
       });
-      const payload = (await response.json()) as { error?: string };
-      if (!response.ok) {
-        setActionError(payload.error ?? "Unable to close bot.");
-        return;
-      }
+      await readActionPayload(response, "Unable to close bot.");
       router.refresh();
-    });
+    }, "Unable to close bot.");
   };
 
   const updateActiveBotExitPrices = () => {
     if (!activeBot) return;
-    setActionError(null);
-    startTransition(async () => {
+    runPanelAction(async () => {
       const response = await fetch(`/api/bots/${activeBot.id}/exit-prices`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -807,13 +808,9 @@ export function GridConfigPanel({
           stopLoss: challengeConfig.stopLoss ?? "",
         }),
       });
-      const payload = (await response.json()) as { error?: string };
-      if (!response.ok) {
-        setActionError(payload.error ?? "Unable to update bot exit levels.");
-        return;
-      }
+      await readActionPayload(response, "Unable to update bot exit levels.");
       router.refresh();
-    });
+    }, "Unable to update bot exit levels.");
   };
 
   return (

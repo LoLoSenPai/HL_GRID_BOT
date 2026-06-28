@@ -16,14 +16,18 @@ export function CloseBotActionButton({ botId, botName }: { botId: string; botNam
     );
     if (!confirmed) return;
 
-    startTransition(async () => {
-      const response = await fetch(`/api/bots/${encodeURIComponent(botId)}/close`, { method: "POST" });
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => ({}))) as { error?: string };
-        window.alert(payload.error ?? "Unable to close bot.");
-        return;
-      }
-      router.refresh();
+    startTransition(() => {
+      void (async () => {
+        const response = await fetch(`/api/bots/${encodeURIComponent(botId)}/close`, { method: "POST" });
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => ({}))) as { error?: string };
+          window.alert(payload.error ?? "Unable to close bot.");
+          return;
+        }
+        router.refresh();
+      })().catch((error) => {
+        window.alert(error instanceof Error ? error.message : "Unable to close bot.");
+      });
     });
   };
 

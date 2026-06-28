@@ -404,6 +404,42 @@ export async function createAndStartProprBot(name: string, config: GridConfig, o
   return updated;
 }
 
+export async function createAndQueueProprBot(name: string, config: GridConfig, ownerUser = getDefaultBotOwnerUser()): Promise<Bot> {
+  await assertChallengeRiskBudget("", config, ownerUser);
+  const bot = createBot(name, {
+    ...config,
+    mode: "propr_live",
+    autoPauseOutOfRange: true,
+    autoRecenter: false,
+  }, ownerUser);
+  updateBotStatus(bot.id, "running", ownerUser);
+  addEvent({
+    botId: bot.id,
+    type: "bot.propr_deploy_queued",
+    severity: "info",
+    message: `${bot.name} deployment queued. Orders are being sent to Propr in the background.`,
+    payload: { pair: bot.config.pair, gridCount: bot.config.gridCount },
+  });
+  queueProprStart(bot.id, ownerUser);
+  const queued = getBot(bot.id, ownerUser);
+  if (!queued) throw new Error("Queued Propr bot was not found.");
+  return queued;
+}
+
+export function queueProprStart(id: string, ownerUser?: string) {
+  void startProprBot(id, ownerUser).catch((error) => {
+    const bot = getBot(id, ownerUser);
+    if (!bot) return;
+    updateBotStatus(id, "error", bot.ownerUser);
+    addEvent({
+      botId: id,
+      type: "bot.propr_start_failed",
+      severity: "error",
+      message: `Queued Propr deployment failed: ${errorMessage(error)}`,
+    });
+  });
+}
+
 export async function startBot(id: string, ownerUser?: string) {
   const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Bot not found.");
@@ -679,6 +715,20 @@ export async function stopBot(id: string, ownerUser?: string) {
   tx();
 }
 
+export function requestStopBot(id: string, ownerUser?: string) {
+  const bot = getBot(id, ownerUser);
+  if (!bot) throw new Error("Bot not found.");
+  if (bot.config.mode !== "propr_live") {
+    queueBotAsync(id, bot.ownerUser, "bot.stop_failed", () => stopBot(id, bot.ownerUser));
+    return bot;
+  }
+
+  markBotClosing(bot, "Stop requested");
+  queueBotAsync(id, bot.ownerUser, "bot.stop_failed", () => stopBot(id, bot.ownerUser));
+  const queued = getBot(id, bot.ownerUser);
+  return queued ?? bot;
+}
+
 export async function closeBot(id: string, reason = "Manual close bot", ownerUser?: string): Promise<CloseBotSummary> {
   const bot = getBot(id, ownerUser);
   if (!bot) throw new Error("Bot not found.");
@@ -858,6 +908,31 @@ export async function closeBot(id: string, reason = "Manual close bot", ownerUse
     errors,
     checkedAt,
   };
+}
+
+export function requestCloseBot(id: string, reason = "Manual close bot", ownerUser?: string) {
+  const bot = getBot(id, ownerUser);
+  if (!bot) throw new Error("Bot not found.");
+  if (bot.config.mode === "propr_live") {
+    markBotClosing(bot, reason);
+  }
+  queueBotAsync(id, bot.ownerUser, "bot.close_failed", () => closeBot(id, reason, bot.ownerUser));
+  const queued = getBot(id, bot.ownerUser);
+  return queued ?? bot;
+}
+
+function queueBotAsync(id: string, ownerUser: string, eventType: string, task: () => Promise<unknown>) {
+  void task().catch((error) => {
+    const bot = getBot(id, ownerUser);
+    if (bot) updateBotStatus(id, "error", ownerUser);
+    addEvent({
+      botId: id,
+      type: eventType,
+      severity: "error",
+      message: `Background Propr action failed: ${errorMessage(error)}`,
+    });
+    console.error("[bot-background-action-failed]", error);
+  });
 }
 
 interface TrackedOrderCancellationResult {

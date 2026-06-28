@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { closeBot } from "@/features/bots/repository";
+import { closeBot, getBot, requestCloseBot } from "@/features/bots/repository";
 import { getCurrentUser } from "@/lib/auth/current-user";
 
 export async function POST(_: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -9,6 +9,11 @@ export async function POST(_: Request, { params }: { params: Promise<{ id: strin
 
   const { id } = await params;
   try {
+    const bot = getBot(id, user);
+    if (bot?.config.mode === "propr_live") {
+      const queued = requestCloseBot(id, "Manual close from bot action", user);
+      return NextResponse.json({ ok: true, data: queued }, { status: 202 });
+    }
     const summary = await closeBot(id, "Manual close from bot action", user);
     return NextResponse.json({ ok: true, summary });
   } catch (error) {

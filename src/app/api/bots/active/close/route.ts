@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { closeBot, getBot, listBots } from "@/features/bots/repository";
+import { closeBot, getBot, listBots, requestCloseBot } from "@/features/bots/repository";
 import { getCurrentUser } from "@/lib/auth/current-user";
 
 export async function POST(request: Request) {
@@ -14,6 +14,10 @@ export async function POST(request: Request) {
   if (!active) return NextResponse.json({ error: "No active bot to close" }, { status: 404 });
 
   try {
+    if (active.config.mode === "propr_live") {
+      const bot = requestCloseBot(active.id, "Manual close from terminal", user);
+      return NextResponse.json({ ok: true, id: active.id, data: bot }, { status: 202 });
+    }
     const summary = await closeBot(active.id, "Manual close from terminal", user);
     return NextResponse.json({ ok: true, id: active.id, summary });
   } catch (error) {
