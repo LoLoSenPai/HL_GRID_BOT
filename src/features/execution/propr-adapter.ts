@@ -66,6 +66,7 @@ export class ProprExecutionAdapter implements ExecutionAdapter {
       ...mapOrder(order),
       botId: intent.botId,
       gridLevelId: intent.gridLevelId,
+      positionSide: intent.positionSide,
     };
   }
 
